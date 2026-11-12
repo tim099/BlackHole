@@ -1,0 +1,4 @@
+# 換行：版控一律 LF，checkout 也一律 LF（不管 core.autocrlf）
+* text=auto eol=lf
+*.jpg binary
+*.png binary
