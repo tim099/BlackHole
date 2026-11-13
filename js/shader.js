@@ -57,10 +57,11 @@ uniform int uDebug;          // 1 ⇒ 只輸出光線的結局（白：到天空
 #if MAX_BODIES > 0
 uniform int uBodyCount;
 uniform vec4 uBodyA[MAX_BODIES];   // 軌跡起點時間 − 攝影機時間, 每單位時間幾格, 第幾列, 半徑
-uniform vec4 uBodyB[MAX_BODIES];   // 顏色 rgb, 種類（0 球，1 光子標記，2 立方體，3 飛船）
+uniform vec4 uBodyB[MAX_BODIES];   // 顏色 rgb, 種類（0 球，1 光子標記，2 立方體，3 飛船，4 有人開的飛船）
 uniform vec4 uBodyC[MAX_BODIES];   // 包圍球：中心 xyz, 半徑
 uniform vec4 uBodyD[MAX_BODIES];   // 可能被看到的時段（相對攝影機時間）：最早, 最晚
-uniform sampler2D uTraj;           // 每個物體兩列：(x, y, z, τ) 與 (dx/dλ, dt/dλ)，橫軸是座標時間
+uniform sampler2D uTraj;           // 每個物體四列：(x, y, z, τ)、(dx/dλ, dt/dλ)，橫軸是座標時間；
+                                   // 種類 4 多用兩列：(機頭 xyz, 引擎出力)、(上方 xyz, 被打中的閃光)
 uniform usampler3D uShip;          // 飛船的格子：每格一個 RGB332 色號（0 ＝ 空），x 機頭、y 左舷、z 上（js/ship.js）
 uniform vec3 uShipDim;             // 飛船外框幾格（nx, ny, nz）；半徑 R ＝ 半個船長
 uniform uvec4 uShipEmit0, uShipEmit1;  // 哪些色號會自己發光（256 個 bit）
@@ -419,7 +420,7 @@ void main(){
         vec3 dc = xm - C.xyz; float reach = C.w + halfLen;
         if (dot(dc, dc) > reach * reach) continue;
         vec4 A = uBodyA[b];
-        int row = int(A.z + .5) * 2;
+        int row = int(A.z + .5) * 4;
         float q0 = clamp((t - A.x) * A.y, 0., float(TRAJ_N - 1));
         float tq = A.x + q0 / A.y;                         // 實際查到的時刻（被夾住時跟 t 不一樣）
         vec4 pb = trajAt(row, q0), ub = trajAt(row + 1, q0);
@@ -431,11 +432,12 @@ void main(){
         vec3 qd = d0 + w * s;
         float d2 = dot(qd, qd), R = A.w;
         vec4 Bc = uBodyB[b];                               // rgb 顏色；a：0 球、1 光子標記、2 立方體、3 飛船
-        bool cube = Bc.a > 1.5 && Bc.a < 2.5, ship = Bc.a > 2.5;
+        bool cube = Bc.a > 1.5 && Bc.a < 2.5, ship = Bc.a > 2.5, piloted = Bc.a > 3.5;
         if (d2 >= (cube ? 3. : (ship ? uShipBound * uShipBound : 1.)) * R * R) continue;   // 立方體、飛船（含噴射）先用外接球粗篩
         if (uGhost < .5 && sweep + dSweep * s > 3.1616) continue;   // 繞過半圈以上才到的 ＝ 重影
         float sHit = s, face = 1., edge = 0.;
         uint shipIdx = 0u; vec3 shipN = vec3(0.), shipPos = vec3(0.);
+        float shipThr = 1., shipFlash = 0.;                // 引擎出力、被打中的閃光（只有種類 4 會變）
         if (ship) {
           /* 飛船：把這一小段光線換進飛船的格子座標（一格 ＝ 2R ÷ nx），沿線走格子（DDA），第一個非空格就是撞到的地方。
            * 走法跟 js/ship.js 的 raycast 一模一樣（顯示卡自我測試拿兩邊的剪影對拍）。
@@ -443,6 +445,17 @@ void main(){
           shipPos = pb.xyz + vb * (t - tq);
           vec3 fw, sd, upv;
           shipFrame(shipPos, vb, fw, sd, upv);
+          if (piloted) {
+            // 有人開的船：機頭不一定朝飛行方向，朝向是開船的人給的（跟位置一樣，查的是光經過那一刻的朝向）
+            vec4 fr = trajAt(row + 2, q0), ur = trajAt(row + 3, q0);
+            if (dot(fr.xyz, fr.xyz) > 1e-8) {
+              fw = normalize(fr.xyz);
+              vec3 u0 = ur.xyz - dot(ur.xyz, fw) * fw;
+              if (dot(u0, u0) > 1e-8) upv = normalize(u0); else upv = normalize(upv - dot(upv, fw) * fw);
+              sd = cross(upv, fw);
+            }
+            shipThr = clamp(fr.w, 0., 1.5); shipFlash = clamp(ur.w, 0., 1.);
+          }
           float kv = 2. * R / uShipDim.x;
           vec3 o = vec3(dot(d0, fw), dot(d0, sd), dot(d0, upv)) / kv + .5 * uShipDim;
           vec3 dv = vec3(dot(w, fw), dot(w, sd), dot(w, upv)) / kv;
@@ -468,7 +481,7 @@ void main(){
             }
           }
           // 引擎噴射：算到撞到船身（或已經找到的更近的東西）為止；不擋光，所以不動 sBody
-          if (uShipPlume.w > .5 && uShipEngN > 0) {
+          if (uShipPlume.w > .5 && uShipEngN > 0 && shipThr > .02) {
             float sNear;
             vec3 gl = shipPlume(o, dv, 0., min(shipIdx != 0u ? sv : 1., min(sBody, 1.)), pb.w + (t - tq) * iut,
                                 hash12(gl_FragCoord.xy + vec2(float(i) * 3.7, float(b) * 11.3)), sNear);
@@ -477,6 +490,7 @@ void main(){
                 vec4 ps = mix(p, p1, sNear);
                 gl = shiftColor(gl, 1. / max(dot(ps.xyz, ub.xyz) + ps.w * ub.w, 1e-4));   // 跟船一起紅移、藍移
               }
+              if (piloted) gl *= shipThr * Bc.rgb;       // 出力多少噴多少；敵我用顏色分
               glowCol += gl; glowS = min(glowS, sNear);
             }
           }
@@ -513,12 +527,14 @@ void main(){
           if (ship) {
             // 飛船不會自己發光（引擎、燈、舷窗除外）：照亮它的是吸積盤 ⇒ 朝黑洞那一面亮；另外留一點環境光，背光面才看得出形狀
             vec3 alb = rgb332(shipIdx);
+            if (piloted) alb *= Bc.rgb;
             if (shipEmit(shipIdx)) c = alb * 2.2;
             else {
               vec3 Ld = normalize(uHole[0].xyz - shipPos);
               c = alb * (.24 + .95 * max(dot(shipN, Ld), 0.) + .10 * max(dot(shipN, -Ld), 0.));
             }
             blink = shipIdx == 224u || shipIdx == 28u || shipIdx == 254u;   // 只有航行燈照船上的鐘閃
+            if (piloted) c = mix(c, vec3(2.6, 2.1, 1.3), shipFlash);
           }
           else if (cube) c = Bc.rgb * face * (.80 + .45 * edge) + vec3(.35) * edge;
           else c = Bc.rgb * (.30 + .70 * sqrt(max(0., 1. - d2 / (R * R))));

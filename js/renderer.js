@@ -6,15 +6,17 @@
  *   disk: {rin, rout, on, brightness, thick}, diskTime, flags[4], exposure, beaconPeriod, debug,
  *   bodies: [{A[4], B[4], C[4], D[4]}]
  * }
- * 物體的軌跡放在一張浮點貼圖裡（每個物體兩列），由 setTrajRow 更新。
+ * 物體的軌跡放在一張浮點貼圖裡（每個物體四列：位置、速度，再加兩列給「有人開的船」放機頭與上方），
+ * 由 setTrajRow／setFrameRow 更新。
  */
 (function (root) {
   'use strict';
   var BH = root.BH = root.BH || {};
 
   var TRAJ_N = 1024;      // 每條軌跡取樣幾點
-  var MAX_ROWS = 16;      // 最多幾條軌跡
-  var BODY_VARIANTS = [0, 4, 16];
+  var MAX_ROWS = 32;      // 最多幾條軌跡（戰鬥模式：幾艘船＋一堆光彈）
+  var ROW_SPAN = 4;       // 每條軌跡在貼圖裡佔幾列
+  var BODY_VARIANTS = [0, 4, 16, 32];
   var DISK_T = 80;
 
   function Renderer(canvas) {
@@ -26,7 +28,7 @@
     this.vao = gl.createVertexArray();
     this.tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, TRAJ_N, MAX_ROWS * 2, 0, gl.RGBA, gl.FLOAT, new Float32Array(TRAJ_N * MAX_ROWS * 2 * 4));
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, TRAJ_N, MAX_ROWS * ROW_SPAN, 0, gl.RGBA, gl.FLOAT, new Float32Array(TRAJ_N * MAX_ROWS * ROW_SPAN * 4));
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -81,8 +83,15 @@
   Renderer.prototype.setTrajRow = function (row, pos, vel) {
     var gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.tex);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row * 2, TRAJ_N, 1, gl.RGBA, gl.FLOAT, pos);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row * 2 + 1, TRAJ_N, 1, gl.RGBA, gl.FLOAT, vel);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row * ROW_SPAN, TRAJ_N, 1, gl.RGBA, gl.FLOAT, pos);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row * ROW_SPAN + 1, TRAJ_N, 1, gl.RGBA, gl.FLOAT, vel);
+  };
+  // 有人開的船：機頭方向（xyz）＋引擎出力（w，0～1）、上方（xyz）＋被打中的閃光（w，0～1），橫軸一樣是座標時間
+  Renderer.prototype.setFrameRow = function (row, fwd, up) {
+    var gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.tex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row * ROW_SPAN + 2, TRAJ_N, 1, gl.RGBA, gl.FLOAT, fwd);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row * ROW_SPAN + 3, TRAJ_N, 1, gl.RGBA, gl.FLOAT, up);
   };
 
   Renderer.prototype.uploadShip = function (dims, grid) {

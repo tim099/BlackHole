@@ -169,7 +169,7 @@
     for (i = 0; i < st.bodies.length; i++) {
       b = st.bodies[i];
       var tr = b.tr, col = 'rgb(' + Math.round(b.color[0] * 255) + ',' + Math.round(b.color[1] * 255) + ',' + Math.round(b.color[2] * 255) + ')';
-      if (b.pulse === 0) {
+      if (b.pulse === 0 && !(st.game && b.kind === 'light')) {      // 戰鬥模式：光彈太多，不畫整條路
         var stp = Math.max(1, Math.floor(tr.n / 600));
         ctx.beginPath();
         ctx.moveTo(X(tr.X[0]), Y(tr.Z[0]));
@@ -178,6 +178,10 @@
         ctx.globalAlpha = 0.38; ctx.strokeStyle = col; ctx.stroke(); ctx.globalAlpha = 1;
       }
       var rad = (b.kind === 'light' ? 2.2 : 3.4) * dpr;
+      if (st.game && b.kind === 'light') {                      // 戰鬥模式的光彈：只畫現在的位置，一個小點
+        if (b.now) { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(X(b.now.x), Y(b.now.z), 1.4 * dpr, 0, 6.2832); ctx.fill(); }
+        continue;
+      }
       if (b.now) {
         ctx.beginPath(); ctx.arc(X(b.now.x), Y(b.now.z), rad + 1.5 * dpr, 0, 6.2832);
         ctx.strokeStyle = col; ctx.globalAlpha = 0.75; ctx.stroke(); ctx.globalAlpha = 1;
@@ -249,11 +253,11 @@
     // 圖例
     ctx.fillStyle = 'rgba(255,255,255,0.78)';
     ctx.font = (11 * dpr) + 'px sans-serif';
-    ctx.fillText('俯視圖（赤道面投影）', 8 * dpr, 15 * dpr);
+    ctx.fillText(st.game ? '雷達（赤道面投影）' : '俯視圖（赤道面投影）', 8 * dpr, 15 * dpr);
     ctx.fillStyle = 'rgba(255,255,255,0.50)';
     ctx.font = (10 * dpr) + 'px sans-serif';
     ctx.fillText('● 你此刻看到的位置　○ 座標上現在的位置', 8 * dpr, H - 21 * dpr);
-    ctx.fillText('虛線圈：光子球 1.5 rs、最內穩定軌道 3 rs　在圖上拖曳＝發射', 8 * dpr, H - 8 * dpr);
+    ctx.fillText(st.game ? '白虛線：你不推會走的路　綠虛線：射擊解那顆光會走的路' : '虛線圈：光子球 1.5 rs、最內穩定軌道 3 rs　在圖上拖曳＝發射', 8 * dpr, H - 8 * dpr);
   };
 
   BH.Map2D = Map2D;

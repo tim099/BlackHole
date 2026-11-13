@@ -1,5 +1,6 @@
-/* 黑洞模擬 —— 介面主程式：場景、控制面板、讀數、畫面迴圈
+/* 黑洞模擬 —— 介面主程式：主選單、場景、控制面板、讀數、畫面迴圈
  * 物理在 physics.js，畫面在 shader.js／renderer.js；這裡只把它們接起來。
+ * 三個狀態（S.mode）：'menu' 主選單（後面照樣跑模擬當背景）、'sim' 黑洞模擬、'game' 太空戰鬥（js/game.js、js/gameui.js）。
  */
 (function () {
   'use strict';
@@ -20,7 +21,7 @@
     grow: false, noHole: false, ghost: true, plume: true,
     launcher: { kind: 'ball', shape: 'cube', r0: 10, phi0: 0.5, incl: 0.4, speed: 0, alpha: 0, mass: 0.01, pulses: 5, color: 'green', shipLen: 1.2 },
     fall: { v: 0, alpha: 0 },
-    unit: 'sgra', scene: 'bend'
+    unit: 'sgra', scene: 'bend', mode: 'menu', attract: false
   };
   var UNITS = {
     none: { name: '不換算', msun: 0 },
@@ -46,6 +47,13 @@
   function shipMeters() { return shipModel ? shipModel.dims[0] * shipModel.data.metersPerVoxel : 0; }
 
   var rs0 = function () { return S.holes[0].rs; };
+
+  // 太空戰鬥模式（要有飛船模型才開得了）
+  var game = null;
+  if (BH.GameUI && BH.Game && shipModel) {
+    game = new BH.GameUI({ canvas: canvas, renderer: renderer, bodies: bodies, map: map, S: S, toast: function (m) { toast(m); },
+      exit: function () { setMode('menu'); }, frameMs: function () { return fpsAvg; } });
+  }
 
   // ── 單位 ────────────────────────────────────────────
   function fmtLen(x) {       // x：長度（模擬單位）
@@ -339,6 +347,21 @@
       '船尾的引擎噴射是特效（船其實是自由落下，沒有推力），但噴射的光一樣被彎、被紅移，靠近視界時連閃爍都慢下來。左邊拋射器的「形狀」選飛船，可以自己丟。'
   };
 
+  /* 換模式。主選單後面跑的是模擬（場景 ④ 當背景）；從主選單第一次進模擬時換回場景 ①。
+   * 戰鬥模式自己管攝影機與畫面上的東西，離開時整個清掉、模擬從場景重新擺。 */
+  function setMode(m) {
+    if (m === 'game' && !game) { toast('飛船模型沒有載入，開不了太空戰鬥'); m = 'sim'; }
+    var was = S.mode;
+    if (was === 'game' && m !== 'game') game.stop();
+    S.mode = m;
+    document.body.className = 'mode-' + m;
+    if (m === 'game') { hideOverlay(); S.paused = false; map.showBeams = false; game.start(); }
+    else if (was === 'game') { S.attract = m === 'menu'; setScene(m === 'menu' ? 'ship' : 'bend'); }
+    else if (m === 'sim' && S.attract) { S.attract = false; setScene('bend'); }
+    else if (m === 'menu' && was !== 'menu') S.paused = false;
+    refreshAll();
+  }
+
   function setScene(name) {
     S.scene = name;
     bodies.clear();
@@ -393,7 +416,7 @@
       camInside: cf.nearHorizon, energyTest: S.holes.length === 1,
       holes: S.holes, far: Math.max(60, rc * 1.08 + 6), maxSteps: S.maxSteps, stepScale: 1,
       disk: { on: S.disk.on, rin: rin, rout: Math.max(S.disk.rout, rin * 1.2), brightness: S.disk.brightness, thick: S.disk.thick },
-      diskTime: dt, flags: [S.shift ? 1 : 0, S.grid ? 1 : 0, S.stars ? 1 : 0, S.beacon ? 1 : 0],
+      diskTime: dt, flags: [S.shift ? 1 : 0, S.grid && S.mode !== 'menu' ? 1 : 0, S.stars ? 1 : 0, S.beacon ? 1 : 0],
       exposure: S.exposure, beaconPeriod: 2.0, ghost: S.ghost, plume: S.plume, debug: false, bodies: bodies.uniforms(cam.t, cf.nearHorizon || cf.ratio < 3)
     };
   }
@@ -454,6 +477,12 @@
     frameNo++;
     var tJs = performance.now();
     try {
+      if (S.mode === 'game' && game && game.active) {
+        game.frame(dtWall, now, Math.max(160, Math.round(canvas.clientWidth * S.scale)), Math.max(90, Math.round(canvas.clientHeight * S.scale)));
+        autoQuality();
+        jsMs = jsMs * 0.9 + (performance.now() - tJs) * 0.1;
+        return;
+      }
       if (!S.paused) {
         var sp = S.speed;
         if (S.autoSlow && cam.mode === 'fall' && cam.plan && cam.plan.fate === 'singularity') {
@@ -497,21 +526,24 @@
         mapMs = mapMs * 0.9 + (performance.now() - tMap) * 0.1;
       }
       if (now - hudT > 120) { hudT = now; updateHud(cf); }
-      /* 自動調解析度：跟不上螢幕更新率（一格超過 21 毫秒）就降一級；很順、而且上次降完過了一陣子，才試著升回去。
-       * 降了之後過 60 格回頭看：沒有變快 ⇒ 慢的原因不是畫面太大（例如分頁在背景、螢幕本來就 30 Hz）⇒ 把解析度還回去，30 秒內不再動。 */
-      if (S.autoQ && frameNo % 30 === 0 && frameNo > autoHold) {
-        if (dropCheck && frameNo - lastDrop >= 60) {
-          if (fpsAvg > dropCheck.ms * 0.9) { S.scale = dropCheck.scale; autoHold = frameNo + 1800; refreshQuality(); }
-          dropCheck = null;
-        } else if (!dropCheck && fpsAvg > 21 && S.scale > 0.35) {
-          dropCheck = { ms: fpsAvg, scale: S.scale };
-          S.scale = Math.max(0.35, S.scale * 0.85); lastDrop = frameNo; refreshQuality();
-        } else if (!dropCheck && fpsAvg < 17.4 && S.scale < 1 && frameNo - lastDrop > 600) { S.scale = Math.min(1, S.scale * 1.06); refreshQuality(); }
-      }
+      autoQuality();
       jsMs = jsMs * 0.9 + (performance.now() - tJs) * 0.1;
     } catch (e) {
       if (!errShown) { errShown = true; fatal('執行時出錯：\n' + (e && e.stack ? e.stack : e)); }
       throw e;
+    }
+  }
+  function autoQuality() {
+    /* 自動調解析度：跟不上螢幕更新率（一格超過 21 毫秒）就降一級；很順、而且上次降完過了一陣子，才試著升回去。
+     * 降了之後過 60 格回頭看：沒有變快 ⇒ 慢的原因不是畫面太大（例如分頁在背景、螢幕本來就 30 Hz）⇒ 把解析度還回去，30 秒內不再動。 */
+    if (S.autoQ && frameNo % 30 === 0 && frameNo > autoHold) {
+      if (dropCheck && frameNo - lastDrop >= 60) {
+        if (fpsAvg > dropCheck.ms * 0.9) { S.scale = dropCheck.scale; autoHold = frameNo + 1800; refreshQuality(); }
+        dropCheck = null;
+      } else if (!dropCheck && fpsAvg > 21 && S.scale > 0.35) {
+        dropCheck = { ms: fpsAvg, scale: S.scale };
+        S.scale = Math.max(0.35, S.scale * 0.85); lastDrop = frameNo; refreshQuality();
+      } else if (!dropCheck && fpsAvg < 17.4 && S.scale < 1 && frameNo - lastDrop > 600) { S.scale = Math.min(1, S.scale * 1.06); refreshQuality(); }
     }
   }
   function refreshQuality() { for (var i = 0; i < refreshers.length; i++) refreshers[i](); }
@@ -519,10 +551,12 @@
   // ── 滑鼠、鍵盤 ──────────────────────────────────────
   var drag = null;
   canvas.addEventListener('pointerdown', function (e) {
+    if (S.mode === 'game') { game.pointerDown(e); return; }
     canvas.setPointerCapture(e.pointerId);
     drag = { x: e.clientX, y: e.clientY, look: e.button === 2 || e.shiftKey || cam.mode !== 'static' };
   });
   canvas.addEventListener('pointermove', function (e) {
+    if (S.mode === 'game') { game.pointerMove(e); return; }
     if (!drag) return;
     var dx = e.clientX - drag.x, dy = e.clientY - drag.y;
     drag.x = e.clientX; drag.y = e.clientY;
@@ -537,19 +571,26 @@
       refreshQuality();
     }
   });
-  canvas.addEventListener('pointerup', function () { drag = null; });
-  canvas.addEventListener('pointercancel', function () { drag = null; });
+  canvas.addEventListener('pointerup', function (e) { if (S.mode === 'game') game.pointerUp(e); drag = null; });
+  canvas.addEventListener('pointercancel', function (e) { if (S.mode === 'game') game.pointerUp(e); drag = null; });
   canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
-  canvas.addEventListener('dblclick', function () { cam.yaw = 0; cam.pitch = 0; });
+  canvas.addEventListener('dblclick', function () { if (S.mode === 'game') return; cam.yaw = 0; cam.pitch = 0; });
   canvas.addEventListener('wheel', function (e) {
     e.preventDefault();
+    if (S.mode === 'game') return;
     if (cam.mode === 'static') cam.r = clamp(cam.r * Math.exp(e.deltaY * 0.001), cam.minRadius(S.holes), 200);
     else cam.fov = clamp(cam.fov * Math.exp(e.deltaY * 0.0008), 20, 150);
     refreshQuality();
   }, { passive: false });
   window.addEventListener('keydown', function (e) {
+    if (S.mode === 'menu') {
+      if (e.key === '1' || e.key === 'Enter') setMode('sim'); else if (e.key === '2') setMode('game');
+      return;
+    }
+    if (S.mode === 'game') { if (game.keyDown(e)) e.preventDefault(); return; }
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) { if (e.code !== 'Space') return; }
     if (e.code === 'Space') { S.paused = !S.paused; e.preventDefault(); }
+    else if (e.key === 'm' || e.key === 'M') { setMode('menu'); return; }
     else if (e.key === '1') setScene('bend');
     else if (e.key === '2') setScene('drop');
     else if (e.key === '3') setScene('fall');
@@ -562,6 +603,12 @@
     refreshAll();
   });
 
+  window.addEventListener('keyup', function (e) { if (game) game.keyUp(e); });
+  window.addEventListener('blur', function () { if (game) game.keys = {}; });
+  var mb = document.querySelectorAll('[data-mode]');
+  for (var mi = 0; mi < mb.length; mi++) (function (b) { b.addEventListener('click', function () { setMode(b.getAttribute('data-mode')); }); })(mb[mi]);
+  $('toMenu').addEventListener('click', function () { setMode('menu'); });
+
   var sb = document.querySelectorAll('[data-scene]');
   for (var si = 0; si < sb.length; si++) (function (b) { b.addEventListener('click', function () { setScene(b.getAttribute('data-scene')); }); })(sb[si]);
   $('panelToggle').addEventListener('click', function () { $('panel').classList.toggle('closed'); });
@@ -569,8 +616,8 @@
   $('mapBeams').addEventListener('click', function () { map.showBeams = !map.showBeams; $('mapBeams').className = map.showBeams ? 'on' : ''; });
   $('ovAgain').addEventListener('click', function () { setScene('fall'); startFall(); refreshAll(); });
   $('ovBack').addEventListener('click', function () { backToHover(); refreshAll(); });
-  map.onAim = function (p) { for (var k in p) S.launcher[k] = p[k]; if (p.speed != null && S.launcher.kind === 'light') S.launcher.speed = 0; refreshAll(); };
-  map.onFire = function () { fire(S.launcher); refreshAll(); };
+  map.onAim = function (p) { if (S.mode !== 'sim') return; for (var k in p) S.launcher[k] = p[k]; if (p.speed != null && S.launcher.kind === 'light') S.launcher.speed = 0; refreshAll(); };
+  map.onFire = function () { if (S.mode !== 'sim') return; fire(S.launcher); refreshAll(); };
 
   // ── 用顯示卡算的自我測試（?selftest=1）──────────────
   function gpuTests() {
@@ -661,6 +708,7 @@
     a = shot(staticCam(30), 20, [P.makeHole({ rs: 0 })]);
     rows.push(T.row('顯示卡・反向對照：把黑洞拿掉之後的黑色像素數', a.black, 0, 0, 'abs', '同一個鏡頭有黑洞時是 ' + shot(staticCam(30), 20, H).black + ' 個'));
     if (shipModel) shipTests(rows, size, T);
+    if (shipModel) gameTests(rows, size, T);
     return rows;
   }
 
@@ -736,6 +784,79 @@
     bodies.clear();
   }
 
+  /* 戰鬥模式用到的兩樣畫面上的東西（平直空間裡驗，有解析答案可以比）：
+   *   1. 「有人開的船」的朝向是另外給的，不是照飛行方向 —— 顯示卡的剪影 ＝ JS 用同一個朝向逐像素走格子算的剪影
+   *   2. 敵機標記畫的位置（js/game.js 的 project，有算光行差）＝ 顯示卡真的把東西畫出來的位置 */
+  function gameTests(rows, size, T) {
+    var G = BH.Game;
+    if (!G || !shipModel) return;
+    var H0 = [P.makeHole({ rs: 0 })], c = new BH.Camera(); c.r = 20; c.theta = 1.05; c.phi = 0.5;
+    var cf = c.frame(H0), fov = 30, tanF = Math.tan(fov * DEG / 2), i;
+    var pos = [0.4, 0.2, -0.3], fwd = G.norm([0.35, 0.5, 0.79]), up = G.norm(G.cross(G.cross(fwd, [0, 1, 0]), fwd)), R = 3;
+    function still(p, f, u) {      // 一直停在 p 的東西（歷史兩格就夠）
+      var h = G.histNew(), v = { T: [-300, 0], X: [p[0], p[0]], Y: [p[1], p[1]], Z: [p[2], p[2]], UX: [0, 0], UY: [0, 0], UZ: [0, 0], UT: [1, 1], PX: [0, 0], PY: [0, 0], PZ: [0, 0], PT: [-1, -1], TAU: [-300, 0],
+        FX: [f[0], f[0]], FY: [f[1], f[1]], FZ: [f[2], f[2]], TH: [0, 0], GX: [u[0], u[0]], GY: [u[1], u[1]], GZ: [u[2], u[2]], FL: [0, 0] };
+      for (var k in v) h[k] = v[k];
+      h.n = 2;
+      return h;
+    }
+    function shot(frameP, camPos) {
+      return renderer.renderToPixels({
+        tanFov: tanF, camPos: camPos, P: frameP, camInside: false, energyTest: false,
+        holes: H0, far: 60, maxSteps: 300, stepScale: 1,
+        disk: { on: false, rin: 3, rout: 12, brightness: 1 }, diskTime: 0, flags: [0, 0, 0, 0], exposure: 1, beaconPeriod: 2, debug: true, plume: false,
+        bodies: bodies.uniforms(0, false)
+      }, size);
+    }
+    function mask(F) {
+      var m = shipModel, kv = 2 * R / m.dims[0], out = new Uint8Array(size * size), ax = ['fwd', 'side', 'up'], o = [0, 0, 0], k, e;
+      var d0 = [cf.pos[0] - pos[0], cf.pos[1] - pos[1], cf.pos[2] - pos[2]];
+      for (k = 0; k < 3; k++) { e = F[ax[k]]; o[k] = (d0[0] * e[0] + d0[1] * e[1] + d0[2] * e[2]) / kv + m.dims[k] / 2; }
+      for (var y = 0; y < size; y++) for (var x = 0; x < size; x++) {
+        var u = ((x + 0.5) * 2 - size) / size * tanF, v = ((y + 0.5) * 2 - size) / size * tanF, l = Math.hypot(u, v, 1);
+        var dl = [u / l, v / l, 1 / l], dir = [0, 0, 0], dv = [0, 0, 0];
+        for (var j = 0; j < 3; j++) dir[j] = -cf.P[0][j] + dl[0] * cf.P[1][j] + dl[1] * cf.P[2][j] + dl[2] * cf.P[3][j];
+        for (k = 0; k < 3; k++) { e = F[ax[k]]; dv[k] = (dir[0] * e[0] + dir[1] * e[1] + dir[2] * e[2]) / kv; }
+        if (BH.Ship.raycast(m, o, dv, 1e9)) out[y * size + x] = 1;
+      }
+      return out;
+    }
+    // 1. 朝向
+    bodies.clear();
+    bodies.addLive(still(pos, fwd, up), { radius: R, color: [1, 1, 1] });
+    bodies.update(H0, 0, cf.pos, false);
+    var px = shot(cf.P, cf.pos), mine = mask({ fwd: fwd, side: G.cross(up, fwd), up: up }), byVel = mask(BH.Ship.frame(pos, [0, 0, 0], H0[0].pos));
+    var nGpu = 0, nCpu = 0, diff = 0, diffVel = 0;
+    for (i = 0; i < size * size; i++) {
+      var g = px[i * 4] < 128 ? 1 : 0;
+      nGpu += g; nCpu += mine[i];
+      if (g !== mine[i]) diff++;
+      if (g !== byVel[i]) diffVel++;
+    }
+    rows.push(T.row('顯示卡・戰鬥：有人開的船（朝向另外給）的剪影跟 JS 算的不一樣的像素數 ÷ 剪影像素數', diff / Math.max(nCpu, 1), 0, 4e-3, 'abs',
+      '剪影：顯示卡 ' + nGpu + '、JS ' + nCpu + ' 像素，不同 ' + diff + ' 個。反向對照：JS 改用「照飛行方向」的朝向算，不同 ' + diffVel + ' 個'));
+    rows.push(T.row('顯示卡・戰鬥・反向對照：照飛行方向的朝向算出來的剪影要差很多（比值 > 10 記 1）', diffVel > 10 * Math.max(diff, 1) ? 1 : 0, 1, 0, 'abs'));
+
+    // 2. 標記：攝影機以 0.12 c 橫著飛，看一顆停著的小球
+    bodies.clear();
+    var ball = [0.5, -0.4, 0.3], tr = still(ball, [1, 0, 0], [0, 1, 0]);
+    bodies.addTraced(tr, { kind: 'ball', color: [1, 1, 1], radius: 0.3, linger: 1e9 });
+    bodies.update(H0, 0, cf.pos, false);
+    var look = G.norm([ball[0] - cf.pos[0], ball[1] - cf.pos[1], ball[2] - cf.pos[2]]), upC = [0, 1, 0];
+    var side = G.norm(G.cross(look, upC)), pm = P.launch(H0, cf.pos, side, 0.12, 'ball');
+    var mv = G.cameraFrame(H0, cf.pos, [pm[4], pm[5], pm[6]], look, upC), st0 = G.cameraFrame(H0, cf.pos, [0, 0, 0], look, upC);
+    px = shot(mv.P, mv.pos);
+    var n = 0, sx = 0, sy = 0;
+    for (i = 0; i < size * size; i++) if (px[i * 4] < 128) { n++; sx += i % size; sy += Math.floor(i / size); }
+    function toPx(pj) { return [(pj[0] / pj[2] / tanF * size + size) / 2 - 0.5, (pj[1] / pj[2] / tanF * size + size) / 2 - 0.5]; }
+    var want = toPx(G.project(H0, mv, ball)), noAb = toPx(G.project(H0, st0, ball)), got = n ? [sx / n, sy / n] : [NaN, NaN];
+    rows.push(T.row('顯示卡・戰鬥：標記的位置跟顯示卡畫出來的小球中心差幾個像素（攝影機 0.12 c 橫著飛）', Math.hypot(got[0] - want[0], got[1] - want[1]), 0, 1.5, 'abs',
+      '小球 ' + n + ' 像素，中心 (' + got[0].toFixed(1) + ', ' + got[1].toFixed(1) + ')；標記 (' + want[0].toFixed(1) + ', ' + want[1].toFixed(1) + ')'));
+    rows.push(T.row('顯示卡・戰鬥・反向對照：不算光行差的標記要差超過 20 個像素（1 = 是）', Math.hypot(got[0] - noAb[0], got[1] - noAb[1]) > 20 ? 1 : 0, 1, 0, 'abs',
+      '不算光行差的標記在 (' + noAb[0].toFixed(1) + ', ' + noAb[1].toFixed(1) + ')，差 ' + Math.hypot(got[0] - noAb[0], got[1] - noAb[1]).toFixed(1) + ' 像素'));
+    bodies.clear();
+  }
+
   function runSelfTest() {
     var el = $('selftest'), pre = $('selftestText');
     el.className = 'box show';
@@ -749,9 +870,15 @@
   // ── 開始 ────────────────────────────────────────────
   buildPanel();
   map.buildBeams(S.holes);
+  /* 網址：?mode=sim｜game 直接進那個模式；?scene=…、?selftest=1 是模擬模式的東西，也直接進模擬；什麼都沒給 ⇒ 主選單。 */
   var q = new URLSearchParams(location.search);
-  setScene(q.get('scene') || 'bend');
-  window.BHApp = { S: S, cam: cam, bodies: bodies, map: map, renderer: renderer, setScene: setScene, fire: fire, startFall: startFall, hover: backToHover, selftest: runSelfTest, refresh: refreshAll };
+  var mode0 = q.get('mode') || ((q.get('scene') || q.get('selftest')) ? 'sim' : 'menu');
+  if (mode0 !== 'sim' && mode0 !== 'game') mode0 = 'menu';
+  S.attract = mode0 === 'menu';
+  setScene(q.get('scene') || (mode0 === 'menu' ? 'ship' : 'bend'));
+  S.mode = 'sim';
+  setMode(mode0);
+  window.BHApp = { S: S, cam: cam, bodies: bodies, map: map, renderer: renderer, game: game, setMode: setMode, setScene: setScene, fire: fire, startFall: startFall, hover: backToHover, selftest: runSelfTest, refresh: refreshAll };
   if (q.get('selftest')) { try { runSelfTest(); } catch (e) { $('selftest').className = 'box show'; $('selftestText').textContent = '自我測試執行失敗：\n' + (e.stack || e); } }
   requestAnimationFrame(tick);
 })();

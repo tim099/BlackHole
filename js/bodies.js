@@ -16,6 +16,11 @@
  * 質量會影響什麼：測地線（路徑）不看質量 —— 這是等效原理，也是本檔把物體當「測試粒子」的前提。
  * 質量只影響 (1) 畫出來的大小，(2) 開了「吃了會變重」時黑洞長多少（rs 增加 mass × E/m × rs）。
  * 質量大到跟黑洞可以比的時候，測試粒子近似本身就不成立，這裡沒有處理。
+ *
+ * 戰鬥模式（js/game.js）另外用到兩種：
+ *   addLive   有人開的船（shape = 'pilot'）：不是測地線，軌跡是「到現在為止實際走過的路」，每一格由外面接長；
+ *             另外帶機頭、上方、引擎出力、被打中的閃光四個欄位，一樣照座標時間存、照光經過的那一刻查。
+ *   addTraced 已經算好的一條軌跡（光彈、爆炸的火球）：不會自動接長，走完就收。
  */
 (function (root) {
   'use strict';
@@ -96,7 +101,79 @@
     var rs = P.resample(b.tr, this.trajN);
     b.t0 = rs.t0; b.t1 = rs.t1;
     if (this.renderer) this.renderer.setTrajRow(b.row, rs.pos, rs.vel);
+    if (b.shape === 'pilot' && this.renderer) {
+      var fr = resampleFrame(b.tr, this.trajN);
+      this.renderer.setFrameRow(b.row, fr.fwd, fr.up);
+    }
   };
+
+  // 有人開的船：機頭（FX FY FZ）＋出力（TH）、上方（GX GY GZ）＋閃光（FL），取樣方式跟 P.resample 一樣
+  function resampleFrame(tr, N) {
+    var t0 = tr.T[0], t1 = tr.T[tr.n - 1], fwd = new Float32Array(4 * N), up = new Float32Array(4 * N), j = 0;
+    for (var i = 0; i < N; i++) {
+      var t = t0 + (t1 - t0) * i / (N - 1);
+      while (j < tr.n - 2 && tr.T[j + 1] < t) j++;
+      var j1 = Math.min(j + 1, tr.n - 1), span = tr.T[j1] - tr.T[j];
+      var w = span > 0 ? Math.min(1, Math.max(0, (t - tr.T[j]) / span)) : 0;
+      fwd[4 * i] = tr.FX[j] + (tr.FX[j1] - tr.FX[j]) * w; fwd[4 * i + 1] = tr.FY[j] + (tr.FY[j1] - tr.FY[j]) * w;
+      fwd[4 * i + 2] = tr.FZ[j] + (tr.FZ[j1] - tr.FZ[j]) * w; fwd[4 * i + 3] = tr.TH[j] + (tr.TH[j1] - tr.TH[j]) * w;
+      up[4 * i] = tr.GX[j] + (tr.GX[j1] - tr.GX[j]) * w; up[4 * i + 1] = tr.GY[j] + (tr.GY[j1] - tr.GY[j]) * w;
+      up[4 * i + 2] = tr.GZ[j] + (tr.GZ[j1] - tr.GZ[j]) * w; up[4 * i + 3] = tr.FL[j] + (tr.FL[j1] - tr.FL[j]) * w;
+    }
+    return { fwd: fwd, up: up };
+  }
+  Bodies.resampleFrame = resampleFrame;
+
+  // 滿了要騰位置：先丟最舊的「不是有人開的船」（光彈、火球、拋射物）；全都是船才丟最舊的那艘
+  Bodies.prototype.makeRoom = function () {
+    while (this.list.length >= this.maxBodies) {
+      var k = 0;
+      for (var i = 0; i < this.list.length; i++) if (!this.list[i].live) { k = i; break; }
+      this.remove(k);
+    }
+  };
+
+  /* 有人開的船。tr 是它到現在為止的歷史（跟 P.trace 回傳的同一種欄位，再加 FX FY FZ TH GX GY GZ FL），
+   * 這個物件由外面持有、每一格接長（或整段換掉）之後呼叫 upload(b)。o：radius（半個船長）、color（染色）。 */
+  Bodies.prototype.addLive = function (tr, o) {
+    this.makeRoom();
+    var b = {
+      group: this.nextGroup++, pulse: 0, kind: 'ball', shape: 'pilot', color: o.color || [1, 1, 1], radius: o.radius,
+      mass: 0, e: 0, absorbed: true, live: true, tr: tr, row: this.freeRows.shift(), spec: null, seen: null, now: null, tag: o.tag || null
+    };
+    this.upload(b);
+    this.list.push(b);
+    return b;
+  };
+
+  /* 一條已經算好的軌跡（光彈、火球）。o：kind（'light'｜'ball'）、color、radius、linger（走完之後再留多久，等它的光到攝影機）。 */
+  Bodies.prototype.addTraced = function (tr, o) {
+    if (!tr || tr.n < 2) return null;
+    this.makeRoom();
+    var b = {
+      group: this.nextGroup++, pulse: 0, kind: o.kind, shape: o.kind === 'light' ? 'dot' : 'ball', color: o.color, radius: o.radius,
+      mass: 0, e: 0, absorbed: true, fixed: true, linger: o.linger, tr: tr, row: this.freeRows.shift(), spec: null, seen: null, now: null, tag: o.tag || null
+    };
+    this.upload(b);
+    this.list.push(b);
+    return b;
+  };
+
+  // 把一條軌跡在時刻 t 截斷（光彈打中東西）：之後的部分不存在了，畫面上它的光走到那一刻就沒了
+  Bodies.prototype.truncate = function (b, t) {
+    var tr = b.tr;
+    if (!(t > tr.T[0]) || t >= tr.T[tr.n - 1]) return;
+    var st = P.sampleAt(tr, t), o = {};
+    for (var k in tr) o[k] = tr[k];
+    var keys = ['T', 'X', 'Y', 'Z', 'UX', 'UY', 'UZ', 'UT', 'PX', 'PY', 'PZ', 'PT', 'TAU'];
+    var last = { T: st.t, X: st.x, Y: st.y, Z: st.z, UX: st.ux, UY: st.uy, UZ: st.uz, UT: st.ut, PX: st.px, PY: st.py, PZ: st.pz, PT: st.pt, TAU: st.tau };
+    for (var i = 0; i < keys.length; i++) o[keys[i]] = tr[keys[i]].slice(0, st.index + 1).concat([last[keys[i]]]);
+    o.n = o.T.length; o.fate = 'hit';
+    b.tr = o;
+    this.upload(b);
+  };
+
+  Bodies.prototype.removeBody = function (b) { var i = this.list.indexOf(b); if (i >= 0) this.remove(i); };
 
   Bodies.prototype.remove = function (i) {
     var b = this.list[i];
@@ -127,7 +204,7 @@
     var radius = light ? 0.15 : (ship ? 0.5 * (spec.shipLen || 1.2) : Math.max(0.14, Math.min(0.6, 0.26 * Math.pow(spec.mass / 0.01, 1 / 3))) * (cube ? 0.8 : 1));
     if (ship) color = [0.78, 0.78, 0.74];
     for (var k = 0; k < n; k++) {
-      while (this.list.length >= this.maxBodies) this.remove(0);
+      this.makeRoom();
       var b = {
         group: group, pulse: k, kind: spec.kind, shape: light ? 'dot' : (ship ? 'ship' : (cube ? 'cube' : 'ball')), color: color, radius: radius,
         mass: light ? 0 : spec.mass, e: tr.e, absorbed: false,
@@ -176,6 +253,7 @@
   Bodies.prototype.replan = function (holes, tNow) {
     for (var i = 0; i < this.list.length; i++) {
       var b = this.list[i], tr = b.tr;
+      if (b.live || b.fixed) continue;
       if (tNow <= tr.T[0] || tNow >= tr.T[tr.n - 1]) continue;
       var st = P.sampleAt(tr, tNow);
       var s = new Float64Array([st.x, st.y, st.z, tNow, st.px, st.py, st.pz, st.pt]);
@@ -201,9 +279,9 @@
     for (var i = this.list.length - 1; i >= 0; i--) {
       var b = this.list[i], tr = b.tr;
       if (!b.absorbed && tr.crossT !== null && tCam >= tr.crossT) { b.absorbed = true; if (b.kind === 'ball') absorbed.push(b); }
-      if (tr.fate === 'timeout' && tCam > b.t1 - 120) { this.extend(b, holes, tCam); tr = b.tr; }
-      var linger = tr.fate === 'singularity' ? 90 : 20;
-      if (tCam > b.t1 + linger) { this.remove(i); continue; }
+      if (!b.live && !b.fixed && tr.fate === 'timeout' && tCam > b.t1 - 120) { this.extend(b, holes, tCam); tr = b.tr; }
+      var linger = b.linger != null ? b.linger : (tr.fate === 'singularity' ? 90 : 20);
+      if (!b.live && tCam > b.t1 + linger) { this.remove(i); continue; }
       var te = this.seenTime(b, holes, tCam, cam, camInside);
       b.seenT = te;
       b.seen = te === null ? null : P.sampleAt(tr, te);
@@ -234,11 +312,12 @@
         if (j === i1) break;
       }
       // 包圍球要包住整個東西：立方體的外接球是半邊長 × √3；飛船的是半船長 × shipBound（船身外框加上船尾的噴射，由 app 照模型設定）
-      var rad = 0.5 * Math.hypot(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]) + b.radius * (b.shape === 'cube' ? 1.75 : (b.shape === 'ship' ? this.shipBound : 1)) + (stride > 1 ? 0.8 : 0.3);
+      var isShip = b.shape === 'ship' || b.shape === 'pilot';
+      var rad = 0.5 * Math.hypot(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]) + b.radius * (b.shape === 'cube' ? 1.75 : (isShip ? this.shipBound : 1)) + (stride > 1 ? 0.8 : 0.3);
       out.push({
         A: [b.t0 - tCam, (this.trajN - 1) / (b.t1 - b.t0), b.row, b.radius],
         D: [lo - tCam, hi - tCam, 0, 0],
-        B: [b.color[0], b.color[1], b.color[2], b.kind === 'light' ? 1 : (b.shape === 'cube' ? 2 : (b.shape === 'ship' ? 3 : 0))],
+        B: [b.color[0], b.color[1], b.color[2], b.kind === 'light' ? 1 : (b.shape === 'cube' ? 2 : (b.shape === 'ship' ? 3 : (b.shape === 'pilot' ? 4 : 0)))],
         C: [0.5 * (mn[0] + mx[0]), 0.5 * (mn[1] + mx[1]), 0.5 * (mn[2] + mx[2]), rad]
       });
     }

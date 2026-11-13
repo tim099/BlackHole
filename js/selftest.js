@@ -287,6 +287,122 @@
         '包圍球 ÷ 半船長 = ' + m.bound.toFixed(3) + '（只包船身的話是 ' + gridBound.toFixed(3) + '；著色器先用它粗篩，包不住 ⇒ 噴射尾巴被切掉）'));
     })();
 
+    // ── 太空戰鬥模式的核心（js/game.js）：推進、光彈、射擊解 ──
+    (function () {
+      var G = node ? require('./game.js') : root.BH.Game;
+      if (!G) { out.push(row('戰鬥核心載入了沒有（1 = 有）', 0, 1, 0, 'abs', '少了 js/game.js')); return; }
+      var H0 = [P.makeHole({ rs: 0 })], d8 = new Float64Array(8), st, a, q;
+      function speedX(holes, s2) { P.rhs(holes, s2, d8); return d8[0] / d8[3]; }
+
+      // 平直空間一直往同一個方向推：v = tanh(aτ)（雙曲線運動），不是 aτ
+      st = P.launch(H0, [5, 0, 0], [1, 0, 0], 0, 'ball');
+      G.advanceTau(H0, st, 30, [1, 0, 0], 0.03);
+      out.push(row('戰鬥・推進：平直空間固有加速度 0.03、推 30 的固有時之後的速度', speedX(H0, st), Math.tanh(0.9), 1e-6, 'rel', '解析值 tanh(aτ) = tanh(0.9)；牛頓的 aτ 是 0.9'));
+      st = P.launch(H0, [5, 0, 0], [1, 0, 0], 0, 'ball');
+      G.advanceTau(H0, st, 20, [1, 0, 0], 0.2);
+      out.push(row('戰鬥・推進：推到 aτ = 4 還是到不了光速（1 − v）', 1 - speedX(H0, st), 1 - Math.tanh(4), 1e-6, 'rel', '牛頓的話早就 4 倍光速了'));
+
+      // 懸停：往外推的固有加速度剛好是 rs / (2r²√(1 − rs/r)) ⇒ 半徑不動
+      var r0 = 6, aHover = 1 / (2 * r0 * r0 * Math.sqrt(1 - 1 / r0));
+      st = P.launch(H1, [r0, 0, 0], [1, 0, 0], 0, 'ball');
+      G.advanceTau(H1, st, 20, [1, 0, 0], aHover);
+      var rHover = Math.hypot(st[0], st[1], st[2]);
+      st = P.launch(H1, [r0, 0, 0], [1, 0, 0], 0, 'ball');
+      G.advanceTau(H1, st, 20, [1, 0, 0], 0);
+      var rFree = Math.hypot(st[0], st[1], st[2]);
+      out.push(row('戰鬥・推進：在 6 rs 用懸停該有的推力往外推 20 的固有時，半徑變了多少', rHover - r0, 0, 2e-5, 'abs',
+        '推力 ' + aHover.toFixed(6) + '（解析值 rs / (2r²√(1 − rs/r))）。反向對照：同一段時間不推，掉到 ' + rFree.toFixed(3) + ' rs'));
+      out.push(row('戰鬥・推進・反向對照：不推的話半徑掉了超過 1 rs（1 = 是）', r0 - rFree > 1 ? 1 : 0, 1, 0, 'abs'));
+
+      // 引擎關掉 ＝ 測地線：跟 physics.js 的 trace 走出來的是同一條
+      st = P.launch(H1, [8, 0, 0], [0.2, 0.3, 1], 0.33, 'ball');
+      var ref = P.trace(H1, st, { tSpan: 400, rMax: 300, frac: 0.004, maxSteps: 400000 }), st2 = Float64Array.from(st);
+      G.advanceTau(H1, st2, 40, [1, 0, 0], 0);
+      q = P.sampleAt(ref, st2[3]);
+      out.push(row('戰鬥・推進・反向對照：引擎關掉走 40 的固有時，跟物理核心的測地線差多遠（rs）', Math.hypot(st2[0] - q.x, st2[1] - q.y, st2[2] - q.z), 0, 2e-5, 'abs',
+        '比的是同一個座標時間 t = ' + st2[3].toFixed(3) + ' 的位置；固有時差 ' + Math.abs(q.tau - 40).toExponential(1)));
+
+      // 一邊繞一邊亂推，4-速度的長度不能跑掉（H = −1/2）
+      st = P.launch(H1, [6, 0, 0], [0, 0, 1], 0.4, 'ball');
+      for (i = 0; i < 300; i++) G.advanceTau(H1, st, 0.1, [Math.cos(i * 0.37), Math.sin(i * 0.61), Math.cos(i * 0.23 + 1)], 0.05);
+      out.push(row('戰鬥・推進：在黑洞旁邊朝各種方向推 30 的固有時之後的 H（有質量粒子 = −1/2）', P.hamiltonian(H1, st), -0.5, 1e-7, 'abs', '此時 r = ' + Math.hypot(st[0], st[1], st[2]).toFixed(3) + ' rs'));
+
+      // 光彈命中：平直空間，兩艘都不動，相距 10
+      function duel(tilt) {
+        var w = new G.World(H0, { empty: true }), c = Math.cos(tilt), sn = Math.sin(tilt);
+        var me = w.addShip('player', P.launch(H0, [-5, 0, 0], [1, 0, 0], 0, 'ball'), [c, 0, sn], [0, 1, 0], { hp: 100 });
+        var foe = w.addShip('enemy', P.launch(H0, [5, 0, 0], [1, 0, 0], 0, 'ball'), [-1, 0, 0], [0, 1, 0], { hp: 100, cool: 1e9 });
+        w.player = me;
+        var tHit = null, n = 0;
+        for (var k = 0; k < 800 && tHit === null; k++) {
+          w.step(0.04, { fire: k === 0 });
+          var ev = w.takeEvents();
+          for (var e2 = 0; e2 < ev.length; e2++) { if (ev[e2].type === 'bolt') n++; if (ev[e2].type === 'hit') tHit = ev[e2].t; }
+        }
+        return { tHit: tHit, bolts: n, hp: foe.hp, cfg: w.cfg };
+      }
+      a = duel(0);
+      out.push(row('戰鬥・光彈：平直空間相距 10、正對著開一發，打中的時刻', a.tHit === null ? -1 : a.tHit, 0.04 + 10 - 0.55 * a.cfg.shipLen - a.cfg.hitRadius, 0.05, 'abs',
+        '光速 1：出膛點在船頭前 ' + (0.55 * a.cfg.shipLen).toFixed(3) + '、進到 ' + a.cfg.hitRadius + ' 以內算打中；對手剩 ' + a.hp + ' 血'));
+      a = duel(5 * Math.PI / 180);
+      out.push(row('戰鬥・光彈・反向對照：機頭偏 5° 再開（最近距離 0.87 > 命中半徑），有沒有打中（0 = 沒有）', a.tHit === null ? 0 : 1, 0, 0, 'abs', '發射了 ' + a.bolts + ' 發，對手還是 ' + a.hp + ' 血'));
+
+      // 射擊解：射手在 8 rs 的圓軌道上（0.27 c），目標在黑洞另一側 6 rs 的軌道 —— 光要繞過去、目標在動、射手自己也在動
+      var sh = G.orbit(H1, 8, 0, 0.1, 1, 0, 1), tg = G.orbit(H1, 6, 2.0, -0.2, -1, 0, 1);
+      var tgTr = G.coast(H1, { x: tg.s[0], y: tg.s[1], z: tg.s[2], t: tg.s[3], px: tg.s[4], py: tg.s[5], pz: tg.s[6], pt: tg.s[7] }, 60);
+      var sol = G.solveAim(H1, sh.s, tgTr, {}), flat = G.solveAim(H1, sh.s, tgTr, { flat: true });
+      function fireMiss(nose) {
+        var ps = G.emit(H1, sh.s, nose, 0), tr2 = P.trace(H1, ps, { tSpan: 40, rMax: 200, frac: 0.006, maxSteps: 40000 }), best = Infinity;
+        for (var k = 0; k < tr2.n - 1; k++) {
+          var qa = P.sampleAt(tgTr, tr2.T[k]), qb = P.sampleAt(tgTr, tr2.T[k + 1]);
+          best = Math.min(best, G.closest([tr2.X[k], tr2.Y[k], tr2.Z[k]], [tr2.X[k + 1], tr2.Y[k + 1], tr2.Z[k + 1]], [qa.x, qa.y, qa.z], [qb.x, qb.y, qb.z]).d);
+        }
+        return best;
+      }
+      var nf = G.noseFor(H1, sh.s, sol.n), mTrue = fireMiss(nf.nose), mNoAb = fireMiss(sol.n);
+      out.push(row('戰鬥・射擊解：照解出來的方向把機頭轉過去、真的發一顆光子，離目標最近多遠（rs）', mTrue, 0, 0.03, 'abs',
+        '解算器自己報的差距 ' + sol.miss.toExponential(1) + '（修了 ' + sol.iters + ' 次）；光飛了 ' + (sol.tHit - sh.s[3]).toFixed(2) + ' 才到；命中半徑 ' + G.CFG.hitRadius));
+      out.push(row('戰鬥・射擊解・反向對照：只用直線估（不管光會彎）的差距要大於命中半徑（1 = 是）', flat.miss > G.CFG.hitRadius ? 1 : 0, 1, 0, 'abs', '直線估差 ' + flat.miss.toFixed(3) + ' rs'));
+      out.push(row('戰鬥・射擊解・反向對照：不修光行差（機頭直接指著光該飛的方向）的差距要大於命中半徑（1 = 是）', mNoAb > G.CFG.hitRadius ? 1 : 0, 1, 0, 'abs',
+        '射手 0.27 c：差 ' + mNoAb.toFixed(3) + ' rs；機頭實際要偏 ' + (Math.acos(Math.min(1, G.dot3(nf.nose, sol.n))) * 180 / Math.PI).toFixed(2) + '°'));
+
+      // 標記投影：平直空間、攝影機以 0.5 c 往前飛，旁邊 60° 的東西看起來被擠到前面（光行差）
+      var pm = P.launch(H0, [0, 0, 0], [1, 0, 0], 0.5, 'ball');
+      var cf = G.cameraFrame(H0, [0, 0, 0], [pm[4], pm[5], pm[6]], [1, 0, 0], [0, 1, 0]);
+      var pj = G.project(H0, cf, [10 * Math.cos(Math.PI / 3), 0, 10 * Math.sin(Math.PI / 3)]);
+      out.push(row('戰鬥・標記：0.5 c 往前飛時，靜止系裡偏 60° 的東西在畫面上偏幾度', Math.atan2(Math.hypot(pj[0], pj[1]), pj[2]) * 180 / Math.PI, Math.acos((0.5 + 0.5) / (1 + 0.25)) * 180 / Math.PI, 1e-6, 'rel',
+        '光行差公式 cos θ′ = (cos θ + v) / (1 + v cos θ)'));
+
+      // 看到的是過去：等速飛的船，觀察者看到的那一刻 te 滿足 te + 距離 = 現在
+      (function () {
+        var w = new G.World(H0, { empty: true });
+        var s3 = w.addShip('enemy', P.launch(H0, [0, 0, 0], [1, 0, 0], 0.6, 'ball'), null, null, { cool: 1e9 });
+        w.player = w.addShip('player', P.launch(H0, [0, 30, 0], [1, 0, 0], 0, 'ball'), null, null, { hp: 100 });
+        for (var k = 0; k < 500; k++) w.step(0.1, {});
+        var obs = [0, 30, 0], rt = w.retarded(s3.hist, obs, w.t);
+        out.push(row('戰鬥・光行時間：看到的那一刻 ＋ 光走的距離 − 現在', rt.t + Math.hypot(rt.x - obs[0], rt.y - obs[1], rt.z - obs[2]) - w.t, 0, 1e-6, 'abs',
+          '現在 t = ' + w.t.toFixed(1) + '，看到的是 t = ' + rt.t.toFixed(2) + ' 的它（那時在 x = ' + rt.x.toFixed(2) + '，現在其實在 x = ' + s3.s[0].toFixed(2) + '）'));
+      })();
+
+      // 整場跑一段：不出現 NaN、敵機有出來、有人開火；同一個種子兩次結果一樣
+      function soak(seed) {
+        var w = new G.World(H1, { seed: seed }), bolts = 0, spawned = 0, bad = 0;
+        for (var k = 0; k < 2400 && w.state === 'play'; k++) {
+          w.step(0.045, { f: (k % 400) < 40 ? 1 : 0, assist: true, fire: (k % 30) === 0 });
+          if ((k % 7) === 0) w.rotatePlayer(0.01, 0.004, 0);
+          var ev = w.takeEvents();
+          for (var e2 = 0; e2 < ev.length; e2++) { if (ev[e2].type === 'bolt') bolts++; if (ev[e2].type === 'spawn') spawned++; }
+          for (var j = 0; j < w.ships.length; j++) if (!isFinite(w.ships[j].s[0] + w.ships[j].s[3] + w.ships[j].s[7])) bad++;
+        }
+        return { bolts: bolts, spawned: spawned, bad: bad, t: w.t, hp: w.player.hp, r: G.radius(H1, w.player.s), state: w.state, wave: w.wave };
+      }
+      var k1 = soak(7), k2 = soak(7);
+      out.push(row('戰鬥・整場：照固定的操作跑一段，壞掉的數字（NaN）幾個', k1.bad, 0, 0, 'abs',
+        '敵機出了 ' + k1.spawned + ' 艘、光彈 ' + k1.bolts + ' 發、第 ' + k1.wave + ' 波、玩家剩 ' + k1.hp + ' 血、在 ' + k1.r.toFixed(2) + ' rs、狀態 ' + k1.state));
+      out.push(row('戰鬥・整場：有敵機、有光彈（1 = 都有）', k1.spawned > 0 && k1.bolts > 0 ? 1 : 0, 1, 0, 'abs'));
+      out.push(row('戰鬥・整場：同一個種子跑兩次，結束時的座標時間差', k1.t - k2.t, 0, 0, 'abs', '兩次都是 t = ' + k1.t.toFixed(6) + '、光彈 ' + k1.bolts + '／' + k2.bolts));
+    })();
+
     return out;
   }
 
