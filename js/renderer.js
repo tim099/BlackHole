@@ -31,6 +31,13 @@
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    // 飛船的格子（3D 整數貼圖，每格一個色號）。還沒載入模型時放一格空的，著色器照樣綁得上
+    this.shipTex = gl.createTexture();
+    this.shipDim = [1, 1, 1];
+    this.shipEmit = new Uint32Array(8);
+    this.shipEng = new Float32Array(8 * 4); this.shipEngN = 0;
+    this.shipPlume = [9.5, 2.4, 0.2]; this.shipBound = 1.2;
+    this.uploadShip([1, 1, 1], new Uint8Array(1));
     this.lastCompileMs = 0;
   }
   Renderer.TRAJ_N = TRAJ_N;
@@ -76,6 +83,28 @@
     gl.bindTexture(gl.TEXTURE_2D, this.tex);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row * 2, TRAJ_N, 1, gl.RGBA, gl.FLOAT, pos);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row * 2 + 1, TRAJ_N, 1, gl.RGBA, gl.FLOAT, vel);
+  };
+
+  Renderer.prototype.uploadShip = function (dims, grid) {
+    var gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_3D, this.shipTex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8UI, dims[0], dims[1], dims[2], 0, gl.RED_INTEGER, gl.UNSIGNED_BYTE, grid);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+    this.shipDim = dims.slice();
+  };
+  // m ＝ BH.Ship.decode(...) 的結果
+  Renderer.prototype.setShip = function (m) {
+    this.uploadShip(m.dims, m.grid); this.shipEmit = m.emit;
+    this.shipEng = new Float32Array(8 * 4); this.shipEngN = Math.min(8, m.engines.length);
+    for (var i = 0; i < this.shipEngN; i++) this.shipEng.set([m.engines[i].x, m.engines[i].y, m.engines[i].z, m.engines[i].r], i * 4);
+    this.shipPlume = [m.plume.len, m.plume.rad, m.plume.gain];
+    this.shipBound = m.bound * 1.02;
   };
 
   Renderer.prototype.resize = function (w, h) {
@@ -131,6 +160,18 @@
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.tex);
       ui('uTraj', 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_3D, this.shipTex);
+      ui('uShip', 1);
+      if (L.uShipDim) gl.uniform3f(L.uShipDim, this.shipDim[0], this.shipDim[1], this.shipDim[2]);
+      var e = this.shipEmit;
+      if (L.uShipEmit0) gl.uniform4ui(L.uShipEmit0, e[0], e[1], e[2], e[3]);
+      if (L.uShipEmit1) gl.uniform4ui(L.uShipEmit1, e[4], e[5], e[6], e[7]);
+      if (L.uShipEng) gl.uniform4fv(L.uShipEng, this.shipEng);
+      ui('uShipEngN', this.shipEngN);
+      u4('uShipPlume', [this.shipPlume[0], this.shipPlume[1], this.shipPlume[2], f.plume === false ? 0 : 1]);
+      u1('uShipBound', this.shipBound);
+      gl.activeTexture(gl.TEXTURE0);
     }
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   };

@@ -17,8 +17,8 @@
     shift: true, grid: true, stars: true, beacon: true, exposure: 1.0,
     mapOn: true,
     autoQ: true, scale: 0.75, maxSteps: 300,
-    grow: false, noHole: false, ghost: true,
-    launcher: { kind: 'ball', shape: 'cube', r0: 10, phi0: 0.5, incl: 0.4, speed: 0, alpha: 0, mass: 0.01, pulses: 5, color: 'green' },
+    grow: false, noHole: false, ghost: true, plume: true,
+    launcher: { kind: 'ball', shape: 'cube', r0: 10, phi0: 0.5, incl: 0.4, speed: 0, alpha: 0, mass: 0.01, pulses: 5, color: 'green', shipLen: 1.2 },
     fall: { v: 0, alpha: 0 },
     unit: 'sgra', scene: 'bend'
   };
@@ -38,6 +38,12 @@
   map = new BH.Map2D($('map'));
 
   function fatal(msg) { var f = $('fatal'); f.style.display = 'flex'; f.textContent = msg; }
+
+  // 飛船模型（雕刻作品的格子，js/ship_data.js）：解碼一次、上傳成 3D 貼圖。壞了就不給飛船這個選項，其他照常
+  var shipModel = null;
+  try { if (BH.Ship && BH.ShipData) { shipModel = BH.Ship.decode(BH.ShipData); renderer.setShip(shipModel); bodies.shipBound = shipModel.bound * 1.05; } }
+  catch (e) { shipModel = null; console.error('飛船模型載入失敗：', e); }
+  function shipMeters() { return shipModel ? shipModel.dims[0] * shipModel.data.metersPerVoxel : 0; }
 
   var rs0 = function () { return S.holes[0].rs; };
 
@@ -197,10 +203,24 @@
     var srow = document.createElement('label'); srow.className = 'ctl';
     srow.innerHTML = '<span class="lab">形狀</span>';
     var ssel = document.createElement('select');
-    [['cube', '發光的立方體'], ['ball', '發光的球']].forEach(function (c) { var o = document.createElement('option'); o.value = c[0]; o.textContent = c[1]; ssel.appendChild(o); });
-    ssel.addEventListener('change', function () { S.launcher.shape = ssel.value; });
+    var shapes = [['cube', '發光的立方體'], ['ball', '發光的球']];
+    if (shipModel) shapes.push(['ship', '飛船（' + shipModel.data.name + '）']);
+    shapes.forEach(function (c) { var o = document.createElement('option'); o.value = c[0]; o.textContent = c[1]; ssel.appendChild(o); });
+    ssel.addEventListener('change', function () { S.launcher.shape = ssel.value; refreshAll(); });
     srow.appendChild(ssel); s.appendChild(srow);
     refreshers.push(function () { ssel.value = S.launcher.shape || 'cube'; srow.style.display = S.launcher.kind === 'ball' ? '' : 'none'; });
+    range(s, { label: '飛船長度', min: 0.3, max: 3, step: 0.05, show: function () { return S.launcher.kind === 'ball' && S.launcher.shape === 'ship'; },
+      get: function () { return S.launcher.shipLen; }, set: function (v) { S.launcher.shipLen = v; }, fmt: function (v) { return (v / (rs0() || 1)).toFixed(2) + ' rs'; } });
+    note(s, function () {
+      if (!shipModel || S.launcher.kind !== 'ball' || S.launcher.shape !== 'ship') return '';
+      // 飛船的實際長度是固定的（雕刻每格 0.1 m）⇒ 拉長度等於換一顆黑洞：rs ＝ 船長 ÷ 畫出來幾個 rs
+      var Lm = shipMeters(), rsM = Lm / (S.launcher.shipLen / (rs0() || 1));
+      var earth = rsM / 0.008870, jup = rsM / 2.8195;
+      return '這艘是雕刻作品 <b>' + shipModel.data.work + '</b>：' + shipModel.dims[0] + ' 格 × 每格 ' + shipModel.data.metersPerVoxel + ' m ＝ <b>' + Lm.toFixed(1) + ' m</b>。' +
+        '照這個比例，這顆黑洞的 rs ≈ <b>' + rsM.toFixed(1) + ' m</b>，大約 ' + (jup >= 1 ? jup.toFixed(1) + ' 個木星' : Math.round(earth) + ' 個地球') + '的質量。' +
+        '<br>真的這麼小的黑洞，潮汐力在很遠的地方就把船扯碎了 —— 這裡只畫光怎麼走，船是剛體、不會被扯長。' +
+        '<br>引擎噴射是特效：船走的是自由落下的測地線（沒有推力），真的開引擎就不會照這條路飛了。噴射的光照樣會被彎、會紅移，閃爍照船上的鐘走。';
+    });
     var crow = document.createElement('label'); crow.className = 'ctl';
     crow.innerHTML = '<span class="lab">顏色</span>';
     var sel = document.createElement('select');
@@ -235,6 +255,7 @@
     button(r, '全部清掉', function () { bodies.clear(); });
     check(s, { label: '物體一閃一閃（照它自己的時間，每 2 rs/c 閃一次）', get: function () { return S.beacon; }, set: function (v) { S.beacon = v; } });
     check(s, { label: '畫出重影（光繞過黑洞另一側才到的像）', get: function () { return S.ghost; }, set: function (v) { S.ghost = v; } });
+    if (shipModel) check(s, { label: '飛船的引擎噴射（特效）', get: function () { return S.plume; }, set: function (v) { S.plume = v; } });
     check(s, { label: '黑洞吃了物體會變重（近似）', get: function () { return S.grow; }, set: function (v) { S.grow = v; } });
     note(s, function () { return '同一個物體會看到兩個以上的像：一個是直接看到的，另一個是光從黑洞另一側繞過來的（比較小、在影子的另一邊）。這是重力透鏡，不是畫錯；吸積盤背面被彎到上面來也是同一回事。<br>路徑跟質量無關（等效原理）；質量只決定畫出來多大，以及黑洞吃掉之後長多少。'; });
 
@@ -311,7 +332,11 @@
       '一個物體會看到不只一個像（另一個在影子的另一側，是光繞過黑洞才到的）。左邊的拋射器可以換速度、方向、質量、形狀，也可以打光束。',
     fall: '<b>自己掉進去。</b>按「從這裡掉下去」。通過視界的那一刻身邊沒有任何記號，外面的天空也不會突然消失；黑色的範圍一路變大，' +
       '過視界時它的角半徑大約 44°，到奇異點前接近 90°（半邊天），但不會把你整個包住。拖曳可以轉頭：正後方的星空越來越紅、越來越暗，' +
-      '跟墜落方向垂直的那一圈越來越藍、越來越亮。能不能活著穿過視界看黑洞多大 —— 右上角的「潮汐力」會告訴你（「顯示」裡可以換黑洞的質量）。'
+      '跟墜落方向垂直的那一圈越來越藍、越來越亮。能不能活著穿過視界看黑洞多大 —— 右上角的「潮汐力」會告訴你（「顯示」裡可以換黑洞的質量）。',
+    ship: '<b>飛船。</b>這艘「餘暉號」是用 3D 雕刻一格一格做的（每格 0.1 m），整艘船直接放進光線追蹤裡：每一道光往回追的時候沿路檢查有沒有碰到船的格子，' +
+      '所以重力透鏡、紅移、光行時間差全都作用在船上 —— 靠近視界時船身被彎成弧形、越來越紅越暗，另一側還看得到它的第二個像。' +
+      '船頭永遠朝飛行方向；照亮它的是吸積盤（朝黑洞那一面亮），翼尖的航行燈照船上自己的鐘一閃一閃。' +
+      '船尾的引擎噴射是特效（船其實是自由落下，沒有推力），但噴射的光一樣被彎、被紅移，靠近視界時連閃爍都慢下來。左邊拋射器的「形狀」選飛船，可以自己丟。'
   };
 
   function setScene(name) {
@@ -333,7 +358,15 @@
       fire({ kind: 'ball', shape: 'cube', r0: 8, phi0: 0.6 - 1.2, incl: 0.2, speed: 0.62 * P.vCirc(8, rs), alpha: 90 * DEG, mass: 0.03 });
       fire({ kind: 'ball', shape: 'cube', r0: 6, phi0: 0.6 + 0.4, incl: 0.5, speed: P.vCirc(6, rs), alpha: 90 * DEG, mass: 0.004 });
       Object.assign(S.launcher, { kind: 'ball', shape: 'cube', r0: 10, phi0: 0.6 - 1.5, incl: 0.3, speed: 0, alpha: 0, mass: 0.01, pulses: 5, color: 'green' });
+    } else if (name === 'ship' && shipModel) {
+      cam.r = 20; cam.theta = 70 * DEG; cam.phi = 0.6; cam.fov = 55;
+      S.disk.on = true; map.showBeams = false; S.beacon = true; S.speed = 2;
+      // 一艘繞圈（6 rs 的圓軌道，穩定）、一艘慢一點會盤旋掉進去
+      fire({ kind: 'ball', shape: 'ship', shipLen: 1.2, r0: 6, phi0: 0.6 + 0.9, incl: 0.35, speed: P.vCirc(6, rs), alpha: 90 * DEG, mass: 0.01 });
+      fire({ kind: 'ball', shape: 'ship', shipLen: 1.2, r0: 10, phi0: 0.6 - 1.1, incl: 0.15, speed: 0.55 * P.vCirc(10, rs), alpha: 90 * DEG, mass: 0.01 });
+      Object.assign(S.launcher, { kind: 'ball', shape: 'ship', shipLen: 1.2, r0: 9, phi0: 0.6 - 1.5, incl: 0.3, speed: 0.6 * P.vCirc(9, rs), alpha: 90 * DEG, mass: 0.01, pulses: 5, color: 'green' });
     } else {
+      if (name === 'ship') name = S.scene = 'fall';
       cam.r = 12; cam.theta = 74 * DEG; cam.phi = 0.6; cam.fov = 100;
       S.disk.on = true; map.showBeams = false; S.speed = 1.5;
       S.fall = { v: 0, alpha: 0 };
@@ -361,7 +394,7 @@
       holes: S.holes, far: Math.max(60, rc * 1.08 + 6), maxSteps: S.maxSteps, stepScale: 1,
       disk: { on: S.disk.on, rin: rin, rout: Math.max(S.disk.rout, rin * 1.2), brightness: S.disk.brightness, thick: S.disk.thick },
       diskTime: dt, flags: [S.shift ? 1 : 0, S.grid ? 1 : 0, S.stars ? 1 : 0, S.beacon ? 1 : 0],
-      exposure: S.exposure, beaconPeriod: 2.0, ghost: S.ghost, debug: false, bodies: bodies.uniforms(cam.t, cf.nearHorizon || cf.ratio < 3)
+      exposure: S.exposure, beaconPeriod: 2.0, ghost: S.ghost, plume: S.plume, debug: false, bodies: bodies.uniforms(cam.t, cf.nearHorizon || cf.ratio < 3)
     };
   }
 
@@ -402,7 +435,7 @@
       else if (b.tr.fate === 'escape') stt = '會飛走';
       else if (b.tr.fate === 'singularity') stt = '正在掉';
       else stt = '繞行中';
-      rows += '<div class="body"><span class="dot" style="background:' + col + '"></span>' + (b.kind === 'light' ? '光束' : '物體') +
+      rows += '<div class="body"><span class="dot" style="background:' + col + '"></span>' + (b.kind === 'light' ? '光束' : (b.shape === 'ship' ? '飛船' : '物體')) +
         '　' + (seenR === null ? '—' : '看到在 r = ' + seenR.toFixed(seenR < 2 ? 3 : 1) + ' rs') +
         (b.kind === 'ball' && b.seen ? '　它的鐘 ' + (b.seen.tau).toFixed(1) : '') + '<div class="small">' + stt + '</div></div>';
     }
@@ -520,6 +553,7 @@
     else if (e.key === '1') setScene('bend');
     else if (e.key === '2') setScene('drop');
     else if (e.key === '3') setScene('fall');
+    else if (e.key === '4') setScene('ship');
     else if (e.key === 'g' || e.key === 'G') S.grid = !S.grid;
     else if (e.key === 'l' || e.key === 'L') fire(S.launcher);
     else if (e.key === 'f' || e.key === 'F') { if (cam.mode === 'static') startFall(); }
@@ -626,7 +660,80 @@
       '同一格如果只用數值積分是 ' + leak(true) + ' 個 —— 那就是影子裡的白色斑紋；多洞／自旋還沒有這條捷徑可用'));
     a = shot(staticCam(30), 20, [P.makeHole({ rs: 0 })]);
     rows.push(T.row('顯示卡・反向對照：把黑洞拿掉之後的黑色像素數', a.black, 0, 0, 'abs', '同一個鏡頭有黑洞時是 ' + shot(staticCam(30), 20, H).black + ' 個'));
+    if (shipModel) shipTests(rows, size, T);
     return rows;
+  }
+
+  /* 飛船：平直空間（拿掉黑洞）裡放一艘靜止的船，顯示卡畫出來的剪影 ＝ JS 逐像素走格子算的剪影。
+   * 兩邊用的是同一個朝向公式、同一個走格子的方法，但一邊是著色器（單精度、分段追光線）、一邊是 js/ship.js（雙精度、一條直線）。 */
+  function shipTests(rows, size, T) {
+    var H0 = [P.makeHole({ rs: 0 })], c = new BH.Camera(); c.r = 20; c.theta = 1.05; c.phi = 0.5;
+    var cf = c.frame(H0), fov = 30, tanF = Math.tan(fov * DEG / 2);
+    var spec = { kind: 'ball', shape: 'ship', shipLen: 6, r0: 0.5, phi0: 0.3, incl: 0, speed: 0, alpha: 0, mass: 0.01 };
+    bodies.clear();
+    if (!bodies.spawn(H0, spec, c.t, cf.pos, false)) { rows.push(T.row('顯示卡・飛船：放得進去（1 = 有）', 0, 1, 0, 'abs')); return; }
+    bodies.update(H0, c.t, cf.pos, false);
+    var b = bodies.list[0], px = renderer.renderToPixels({
+      tanFov: tanF, camPos: cf.pos, P: cf.P, camInside: false, energyTest: false,
+      holes: H0, far: 60, maxSteps: 300, stepScale: 1,
+      disk: { on: false, rin: 3, rout: 12, brightness: 1 }, diskTime: 0, flags: [0, 0, 0, 0], exposure: 1, beaconPeriod: 2, debug: true,
+      bodies: bodies.uniforms(c.t, false)
+    }, size);
+    var st = P.sampleAt(b.tr, b.tr.T[0]), pos = [st.x, st.y, st.z];
+    function cpuMask(flip) {
+      var F = BH.Ship.frame(pos, [0, 0, 0], H0[0].pos), m = shipModel, kv = 2 * b.radius / m.dims[0], out = new Uint8Array(size * size);
+      if (flip) { F.fwd = F.fwd.map(function (v) { return -v; }); F.side = F.side.map(function (v) { return -v; }); }
+      var d0 = [cf.pos[0] - pos[0], cf.pos[1] - pos[1], cf.pos[2] - pos[2]];
+      var o = [0, 0, 0], ax = ['fwd', 'side', 'up'];
+      for (var k = 0; k < 3; k++) { var e = F[ax[k]]; o[k] = (d0[0] * e[0] + d0[1] * e[1] + d0[2] * e[2]) / kv + m.dims[k] / 2; }
+      for (var y = 0; y < size; y++) for (var x = 0; x < size; x++) {
+        var u = ((x + 0.5) * 2 - size) / size * tanF, v = ((y + 0.5) * 2 - size) / size * tanF, l = Math.hypot(u, v, 1);
+        var dl = [u / l, v / l, 1 / l], dir = [0, 0, 0];
+        for (var j = 0; j < 3; j++) dir[j] = -cf.P[0][j] + dl[0] * cf.P[1][j] + dl[1] * cf.P[2][j] + dl[2] * cf.P[3][j];
+        var dv = [0, 0, 0];
+        for (k = 0; k < 3; k++) { e = F[ax[k]]; dv[k] = (dir[0] * e[0] + dir[1] * e[1] + dir[2] * e[2]) / kv; }
+        if (BH.Ship.raycast(m, o, dv, 1e9)) out[y * size + x] = 1;
+      }
+      return out;
+    }
+    var cpu = cpuMask(false), flip = cpuMask(true), nGpu = 0, nCpu = 0, diff = 0, diffFlip = 0;
+    for (var i = 0; i < size * size; i++) {
+      var g = px[i * 4] < 128 ? 1 : 0;           // debug 模式：被東西擋住 ⇒ 黑，到天空 ⇒ 白
+      nGpu += g; nCpu += cpu[i];
+      if (g !== cpu[i]) diff++;
+      if (g !== flip[i]) diffFlip++;
+    }
+    rows.push(T.row('顯示卡・飛船：剪影跟 JS 逐像素走格子算的不一樣的像素數 ÷ 剪影像素數（512 見方、平直空間、船長 6）', diff / Math.max(nCpu, 1), 0, 4e-3, 'abs',
+      '剪影：顯示卡 ' + nGpu + '、JS ' + nCpu + ' 像素，不同 ' + diff + ' 個（單精度在格子稜線上會差一兩個像素）。反向對照：JS 把機頭轉 180° 再算，不同 ' + diffFlip + ' 個'));
+    rows.push(T.row('顯示卡・飛船・反向對照：機頭轉 180° 的剪影跟顯示卡不同的像素數要遠多於上一項（比值 > 10 記 1）', diffFlip > 10 * Math.max(diff, 1) ? 1 : 0, 1, 0, 'abs'));
+    // 噴射：開、關各畫一張正常的圖（上面的剪影是開著噴射畫的 —— 噴射不擋光，所以剪影一格都不該變）。
+    // 變亮的像素要夠多（看得到），而且重心要落在船尾那一側（往 −x 噴，不是畫反了）。
+    function shotPlume(on) {
+      return renderer.renderToPixels({
+        tanFov: tanF, camPos: cf.pos, P: cf.P, camInside: false, energyTest: false,
+        holes: H0, far: 60, maxSteps: 300, stepScale: 1,
+        disk: { on: false, rin: 3, rout: 12, brightness: 1 }, diskTime: 0, flags: [0, 0, 0, 0], exposure: 1, beaconPeriod: 2, debug: false, plume: on,
+        bodies: bodies.uniforms(c.t, false)
+      }, size);
+    }
+    var pOn = shotPlume(true), pOff = shotPlume(false), nCh = 0, sx = 0, sy = 0;
+    for (i = 0; i < size * size; i++) {
+      var dd = Math.abs(pOn[i * 4] - pOff[i * 4]) + Math.abs(pOn[i * 4 + 1] - pOff[i * 4 + 1]) + Math.abs(pOn[i * 4 + 2] - pOff[i * 4 + 2]);
+      if (dd > 12) { nCh++; sx += i % size; sy += Math.floor(i / size); }
+    }
+    function proj(X) {
+      var v = [X[0] - cf.pos[0], X[1] - cf.pos[1], X[2] - cf.pos[2]], q = [0, 0, 0];
+      for (var k = 1; k <= 3; k++) q[k - 1] = v[0] * cf.P[k][0] + v[1] * cf.P[k][1] + v[2] * cf.P[k][2];
+      return [(q[0] / q[2] / tanF * size + size) / 2 - 0.5, (q[1] / q[2] / tanF * size + size) / 2 - 0.5];
+    }
+    var F0 = BH.Ship.frame(pos, [0, 0, 0], H0[0].pos), Rb = b.radius;
+    var nose = proj([pos[0] + F0.fwd[0] * Rb, pos[1] + F0.fwd[1] * Rb, pos[2] + F0.fwd[2] * Rb]);
+    var stern = proj([pos[0] - F0.fwd[0] * Rb, pos[1] - F0.fwd[1] * Rb, pos[2] - F0.fwd[2] * Rb]);
+    var cen = nCh ? [sx / nCh, sy / nCh] : [NaN, NaN];
+    var dN = Math.hypot(cen[0] - nose[0], cen[1] - nose[1]), dS = Math.hypot(cen[0] - stern[0], cen[1] - stern[1]);
+    rows.push(T.row('顯示卡・飛船噴射：開噴射之後變亮的像素，重心離船尾比離機頭近（1 = 是）', nCh > 300 && dS < dN ? 1 : 0, 1, 0, 'abs',
+      '變亮 ' + nCh + ' 個像素；重心 (' + cen[0].toFixed(0) + ', ' + cen[1].toFixed(0) + ')，離船尾 ' + dS.toFixed(0) + ' px、離機頭 ' + dN.toFixed(0) + ' px；' + shipModel.engines.length + ' 具引擎（從格子找的）'));
+    bodies.clear();
   }
 
   function runSelfTest() {

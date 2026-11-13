@@ -74,10 +74,11 @@
     <button data-scene="bend">① 光線彎曲</button>
     <button data-scene="drop">② 物體掉入</button>
     <button data-scene="fall">③ 自己掉入</button>
+    <button data-scene="ship">④ 飛船</button>
   </div>
   <div class="btnrow" id="quick"></div>
   <div id="sections"></div>
-  <div class="note" style="margin-top:8px">滑鼠：拖曳＝繞著黑洞轉（落下時＝轉頭）；Shift 或右鍵拖曳＝轉頭；滾輪＝遠近（落下時＝視角）；按兩下＝看回黑洞。<br>鍵盤：空白鍵暫停、1 2 3 換場景、G 參考格線開關、L 發射、F 落下、H 懸停。</div>
+  <div class="note" style="margin-top:8px">滑鼠：拖曳＝繞著黑洞轉（落下時＝轉頭）；Shift 或右鍵拖曳＝轉頭；滾輪＝遠近（落下時＝視角）；按兩下＝看回黑洞。<br>鍵盤：空白鍵暫停、1 2 3 4 換場景、G 參考格線開關、L 發射、F 落下、H 懸停。</div>
 </div>
 
 <div id="hud" class="box"></div>
@@ -92,6 +93,8 @@
 <div id="fatal"></div>
 
 <script src="js/physics.js"></script>
+<script src="js/ship_data.js"></script>
+<script src="js/ship.js"></script>
 <script src="js/selftest.js"></script>
 <script src="js/shader.js"></script>
 <script src="js/renderer.js"></script>

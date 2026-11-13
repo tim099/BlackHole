@@ -4,7 +4,8 @@
  */
 (function (root) {
   'use strict';
-  var P = (typeof module !== 'undefined' && module.exports) ? require('./physics.js') : root.BH.Physics;
+  var node = typeof module !== 'undefined' && !!module.exports;
+  var P = node ? require('./physics.js') : root.BH.Physics;
 
   function row(name, got, want, tol, how, note) {
     var err = (how === 'abs') ? Math.abs(got - want) : Math.abs(got - want) / Math.abs(want);
@@ -218,6 +219,72 @@
       out.push(row('反向對照（沒有黑洞）：b = 0.5 的光有沒有被抓住（0 = 沒有）', r.tr.fate === 'singularity' ? 1 : 0, 0, 0, 'abs', '結局 ' + r.tr.fate));
       r = shootLight(H1, -300, 0.5, 400);
       out.push(row('對照組（有黑洞）：b = 0.5 的光有沒有被抓住（1 = 有）', r.tr.fate === 'singularity' ? 1 : 0, 1, 0, 'abs', '結局 ' + r.tr.fate));
+    })();
+
+    // 13. 飛船模型（雕刻作品的格子）：解碼對得上 Python 那一側、格子射線對得上暴力法
+    (function () {
+      var Ship = node ? require('./ship.js') : root.BH.Ship, D = node ? require('./ship_data.js') : root.BH.ShipData;
+      if (!Ship || !D) { out.push(row('飛船模型載入了沒有（1 = 有）', 0, 1, 0, 'abs', '少了 js/ship.js 或 js/ship_data.js')); return; }
+      var m = Ship.decode(D);
+      out.push(row('飛船：解碼出來的非空格數', m.count, D.count, 0, 'abs', D.work + '（' + D.name + '），外框 ' + D.dims.join('×') + '，每格 ' + D.metersPerVoxel + ' m'));
+      out.push(row('飛船：校驗碼（JS 解碼後算的 − Python 封檔時算的）', Ship.checksum(m), D.fnv, 0, 'abs', 'FNV-1a 32；兩邊各自從格子算'));
+      // 隨機射線：從外框外面隨便一點，瞄外框裡隨便一點；DDA 跟暴力法要撞到同一格（或都沒撞到）
+      var seed = 12345;
+      function rnd() { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return seed / 4294967296; }
+      var N = 160, agree = 0, hits = 0, worst = 0, nx = D.dims[0], ny = D.dims[1], nz = D.dims[2], k;
+      for (k = 0; k < N; k++) {
+        var tgt = [nx * (0.15 + 0.7 * rnd()), ny * (0.15 + 0.7 * rnd()), nz * (0.15 + 0.7 * rnd())];
+        var th = Math.acos(2 * rnd() - 1), ph = 2 * Math.PI * rnd(), R = 1.2 * Math.hypot(nx, ny, nz);
+        var o = [nx / 2 + R * Math.sin(th) * Math.cos(ph), ny / 2 + R * Math.sin(th) * Math.sin(ph), nz / 2 + R * Math.cos(th)];
+        var d = [tgt[0] - o[0], tgt[1] - o[1], tgt[2] - o[2]];
+        var a = Ship.raycast(m, o, d, 1.5), b = Ship.bruteforce(m, o, d, 1.5);
+        if (!a && !b) { agree++; continue; }
+        if (a && b) {
+          hits++;
+          var ds = Math.abs(a.s - b.s) * Math.hypot(d[0], d[1], d[2]);   // 換成「格」
+          worst = Math.max(worst, ds);
+          if (ds < 1e-6) agree++;
+        }
+      }
+      out.push(row('飛船：格子射線（DDA）跟暴力法撞到同一個深度的比例（' + N + ' 條隨機射線，其中 ' + hits + ' 條有撞到）', agree / N, 1, 0, 'abs',
+        '撞到的那一點最多差 ' + worst.toExponential(1) + ' 格（剛好碰在兩格的稜線上時兩邊可能挑不同格，所以比深度不比格號）'));
+      // 反向對照：格子全部清空，同一個走法一條都不該撞到；只留一格，瞄著它要撞到、偏一格要撞不到
+      var empty = { dims: m.dims, grid: new Uint8Array(m.grid.length) }, any = 0;
+      for (k = 0; k < 40; k++) {
+        var o2 = [-50 + 300 * rnd(), -50 + 200 * rnd(), -20 + 80 * rnd()], d2 = [nx / 2 - o2[0], ny / 2 - o2[1], nz / 2 - o2[2]];
+        if (Ship.raycast(empty, o2, d2, 2)) any++;
+      }
+      out.push(row('飛船・反向對照：格子全部清空之後，40 條射線撞到東西的條數', any, 0, 0, 'abs'));
+      var one = { dims: m.dims, grid: new Uint8Array(m.grid.length) }, cx = 37, cy = 51, cz = 12;
+      one.grid[cx + nx * (cy + ny * cz)] = 7;
+      var hitOne = Ship.raycast(one, [-20, cy + 0.5, cz + 0.5], [cx + 20.5, 0, 0], 2), missOne = Ship.raycast(one, [-20, cy + 1.5, cz + 0.5], [cx + 20.5, 0, 0], 2);
+      out.push(row('飛船・反向對照：只留一格 (37,51,12)，正對它射撞到的 x 格號 ＋ 偏一格射撞到的條數', (hitOne ? hitOne.cell[0] : -1) + (missOne ? 1 : 0), cx, 0, 'abs',
+        '撞到的面 ' + (hitOne ? '軸 ' + hitOne.axis : '—') + '（應該是 0：從 −x 那一面進去）'));
+      // 引擎（噴射從哪裡噴）：tools/ship_pack.py 從格子找的。船左右對稱 ⇒ 每一具都要有鏡像的另一具（y ↔ ny − y，中間那具對到自己）
+      var E = m.engines, unpaired = 0, shallow = 0, worstPair = 0;
+      E.forEach(function (e) {
+        var best = Infinity;
+        E.forEach(function (f) { if (f.x === e.x && f.z === e.z) best = Math.min(best, Math.abs(f.y - (ny - e.y)) + Math.abs(f.r - e.r)); });
+        worstPair = Math.max(worstPair, best);
+        if (!(best < 1e-6)) unpaired++;
+        if (!(e.disc > e.x)) shallow++;
+        var c = D.dims, g = m.grid, at = Math.floor(e.disc) + c[0] * (Math.floor(e.y) + c[1] * Math.floor(e.z));
+        if (D.emissive.indexOf(g[at]) < 0) shallow++;          // 盤的中心那一格要真的是發光的引擎格
+      });
+      out.push(row('飛船：找到的引擎具數', E.length, 5, 0, 'abs', E.map(function (e) { return '(' + e.x + ', ' + e.y + ', ' + e.z + ') r=' + e.r; }).join('　')));
+      out.push(row('飛船：引擎沒有鏡像對手的具數 ＋ 噴嘴口不在發光盤後面（或盤心不是發光格）的具數', unpaired + shallow, 0, 0, 'abs',
+        '鏡像最多差 ' + worstPair.toExponential(1) + ' 格（船是照中線 y = ' + (ny / 2) + ' 左右對稱雕的）'));
+      var gridBound = Math.hypot(nx, ny, nz) / nx;
+      var cover = 1;
+      E.forEach(function (e) {
+        var bx = Ship.plumeBox(e, m.plume);
+        for (var k2 = 0; k2 < 8; k2++) {
+          var p2 = [(k2 & 1) ? bx.max[0] : bx.min[0], (k2 & 2) ? bx.max[1] : bx.min[1], (k2 & 4) ? bx.max[2] : bx.min[2]];
+          if (Math.hypot(p2[0] - nx / 2, p2[1] - ny / 2, p2[2] - nz / 2) > m.bound * nx / 2 + 1e-9) cover = 0;
+        }
+      });
+      out.push(row('飛船：包圍球包得住每一具噴射的外框（1 = 是）', cover, 1, 0, 'abs',
+        '包圍球 ÷ 半船長 = ' + m.bound.toFixed(3) + '（只包船身的話是 ' + gridBound.toFixed(3) + '；著色器先用它粗篩，包不住 ⇒ 噴射尾巴被切掉）'));
     })();
 
     return out;

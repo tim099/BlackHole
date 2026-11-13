@@ -21,7 +21,7 @@
 
   function frag(o) {
     return '#version 300 es\n' +
-      'precision highp float;\nprecision highp int;\nprecision highp sampler2D;\n' +
+      'precision highp float;\nprecision highp int;\nprecision highp sampler2D;\nprecision highp usampler3D;\n' +
       '#define MAX_HOLES ' + o.maxHoles + '\n' +
       '#define MAX_BODIES ' + o.maxBodies + '\n' +
       '#define TRAJ_N ' + o.trajN + '\n' + BODY;
@@ -57,10 +57,18 @@ uniform int uDebug;          // 1 ⇒ 只輸出光線的結局（白：到天空
 #if MAX_BODIES > 0
 uniform int uBodyCount;
 uniform vec4 uBodyA[MAX_BODIES];   // 軌跡起點時間 − 攝影機時間, 每單位時間幾格, 第幾列, 半徑
-uniform vec4 uBodyB[MAX_BODIES];   // 顏色 rgb, 種類（0 物體，1 光）
+uniform vec4 uBodyB[MAX_BODIES];   // 顏色 rgb, 種類（0 球，1 光子標記，2 立方體，3 飛船）
 uniform vec4 uBodyC[MAX_BODIES];   // 包圍球：中心 xyz, 半徑
 uniform vec4 uBodyD[MAX_BODIES];   // 可能被看到的時段（相對攝影機時間）：最早, 最晚
 uniform sampler2D uTraj;           // 每個物體兩列：(x, y, z, τ) 與 (dx/dλ, dt/dλ)，橫軸是座標時間
+uniform usampler3D uShip;          // 飛船的格子：每格一個 RGB332 色號（0 ＝ 空），x 機頭、y 左舷、z 上（js/ship.js）
+uniform vec3 uShipDim;             // 飛船外框幾格（nx, ny, nz）；半徑 R ＝ 半個船長
+uniform uvec4 uShipEmit0, uShipEmit1;  // 哪些色號會自己發光（256 個 bit）
+#define MAX_ENG 8
+uniform vec4 uShipEng[MAX_ENG];    // 每具引擎：噴嘴口的 x（噴射往 −x）, 中心 y, z, 半徑（模型座標，格）
+uniform int uShipEngN;
+uniform vec4 uShipPlume;           // 噴射長度 ÷ 引擎半徑, 外框半寬 ÷ 引擎半徑, 亮度, 開關（js/ship.js 的 PLUME）
+uniform float uShipBound;          // 包住船身與噴射的球半徑 ÷ 半個船長（粗篩用）
 #endif
 out vec4 outColor;
 
@@ -272,6 +280,59 @@ vec4 trajAt(int row, float s){
   float w = s - float(i);
   return mix(texelFetch(uTraj, ivec2(i, row), 0), texelFetch(uTraj, ivec2(i + 1, row), 0), w);
 }
+vec3 rgb332(uint i){ return vec3(float((i >> 5u) & 7u) / 7., float((i >> 2u) & 7u) / 7., float(i & 3u) / 3.); }
+bool shipEmit(uint i){
+  uint w = i >> 5u, m = 1u << (i & 31u);
+  uint v = w < 4u ? uShipEmit0[w] : uShipEmit1[w - 4u];
+  return (v & m) != 0u;
+}
+/* 飛船的朝向（跟 js/ship.js 的 frame 同一套）：機頭朝座標速度，還沒動起來時朝黑洞；上 ＝ 軌道面法線，
+ * 直直掉（沒有軌道面）時取世界 +y。fwd × side = up。 */
+void shipFrame(vec3 pos, vec3 vel, out vec3 fwd, out vec3 side, out vec3 up){
+  vec3 rel = pos - uHole[0].xyz;
+  fwd = length(vel) > 1e-4 ? normalize(vel) : normalize(-rel);
+  up = cross(rel, vel);
+  if (length(up) < 1e-6 * (length(rel) * length(vel) + 1e-12)) up = vec3(0., 1., 0.);
+  up = normalize(up);
+  up -= dot(up, fwd) * fwd;
+  if (length(up) < 1e-3) up = abs(fwd.y) < .9 ? vec3(0., 1., 0.) : vec3(1., 0., 0.);
+  up = normalize(up - dot(up, fwd) * fwd);
+  side = cross(up, fwd);
+}
+/* 引擎噴射（特效，不是模擬）：從每個噴嘴口往 −x 噴出去的一團發光氣體 —— 不擋光，只沿著光線把光加上去。
+ * 亮的芯 ＋ 外面一圈藍色的暈，越往後越淡、越粗；芯上有一節一節的亮紋。閃爍照船自己的固有時 tau 走，
+ * 所以靠近視界時噴射也跟著慢下來。o、dv：這一小段光線在模型座標（格）裡的起點與位移，只算 s ∈ [s0, s1]。
+ * 回傳加上去的顏色；sNear ＝ 這一小段最先碰到噴射外框的位置（沒碰到 ⇒ 2）。 */
+vec3 shipPlume(vec3 o, vec3 dv, float s0, float s1, float tau, float jit, out float sNear){
+  vec3 acc = vec3(0.); sNear = 2.;
+  float vl = length(dv);
+  vec3 dvs = vec3(abs(dv.x) < 1e-9 ? 1e-9 : dv.x, abs(dv.y) < 1e-9 ? 1e-9 : dv.y, abs(dv.z) < 1e-9 ? 1e-9 : dv.z);
+  for (int e = 0; e < MAX_ENG; e++) {
+    if (e >= uShipEngN) break;
+    vec4 E = uShipEng[e];
+    float Lp = uShipPlume.x * E.w, Rm = uShipPlume.y * E.w;
+    vec3 tA = (vec3(E.x - Lp, E.y - Rm, E.z - Rm) - o) / dvs, tB = (vec3(E.x, E.y + Rm, E.z + Rm) - o) / dvs;
+    vec3 tmn = min(tA, tB), tmx = max(tA, tB);
+    float a = max(max(max(tmn.x, tmn.y), tmn.z), s0), b = min(min(min(tmx.x, tmx.y), tmx.z), s1);
+    if (a >= b) continue;
+    sNear = min(sNear, a);
+    float fe = float(e);
+    float flick = .86 + .14 * sin(tau * 29. + fe * 2.1) * sin(tau * 17.3 + fe);
+    float dsv = (b - a) * vl * .125;                  // 一個取樣點代表幾格長
+    for (int k = 0; k < 8; k++) {
+      vec3 q = o + dv * (a + (b - a) * (float(k) + jit) * .125);
+      float u = E.x - q.x;                              // 噴嘴口後面多遠（格）
+      if (u < 0.) continue;
+      float rp = E.w * (1. + .6 * u / Lp);              // 越往後越粗
+      float rr = length(q.yz - E.yz) / rp;
+      float fall = exp(-2.6 * u / Lp);
+      float core = exp(-5. * rr * rr) * (.78 + .22 * cos(6.2832 * u / (1.8 * E.w))) * (1. + 1.4 * exp(-u / (.9 * E.w)));   // 噴嘴口最熱
+      float halo = exp(-1.6 * rr * rr);
+      acc += (vec3(.80, .95, 1.) * (1.7 * core) + vec3(.20, .46, 1.) * (.75 * halo)) * (fall * flick * dsv);
+    }
+  }
+  return acc * uShipPlume.z;
+}
 #endif
 
 void main(){
@@ -343,6 +404,7 @@ void main(){
     // 這一小段上有沒有撞到物體。物體會動，所以要用「光經過那裡的那一刻」它在哪：
     // 這一小段時間內把物體當成等速直線，相對位置 d(s) = d0 + w s 是 s 的一次式，最近的 s 直接解。
     float sBody = 2.; vec3 bCol = vec3(0.);
+    vec3 glowCol = vec3(0.); float glowS = 2.;          // 這一小段上飛船噴射加上去的光、最先碰到噴射的位置
 #if MAX_BODIES > 0
     {
       vec3 xm = .5 * (x + x1); float halfLen = .5 * sqrt(seg2);
@@ -368,11 +430,60 @@ void main(){
         float s = clamp(-dot(d0, w) / max(dot(w, w), 1e-12), 0., 1.);
         vec3 qd = d0 + w * s;
         float d2 = dot(qd, qd), R = A.w;
-        vec4 Bc = uBodyB[b];                               // rgb 顏色；a：0 球、1 光子標記、2 立方體
-        bool cube = Bc.a > 1.5;
-        if (d2 >= (cube ? 3. : 1.) * R * R) continue;      // 立方體先用外接球粗篩
+        vec4 Bc = uBodyB[b];                               // rgb 顏色；a：0 球、1 光子標記、2 立方體、3 飛船
+        bool cube = Bc.a > 1.5 && Bc.a < 2.5, ship = Bc.a > 2.5;
+        if (d2 >= (cube ? 3. : (ship ? uShipBound * uShipBound : 1.)) * R * R) continue;   // 立方體、飛船（含噴射）先用外接球粗篩
         if (uGhost < .5 && sweep + dSweep * s > 3.1616) continue;   // 繞過半圈以上才到的 ＝ 重影
         float sHit = s, face = 1., edge = 0.;
+        uint shipIdx = 0u; vec3 shipN = vec3(0.), shipPos = vec3(0.);
+        if (ship) {
+          /* 飛船：把這一小段光線換進飛船的格子座標（一格 ＝ 2R ÷ nx），沿線走格子（DDA），第一個非空格就是撞到的地方。
+           * 走法跟 js/ship.js 的 raycast 一模一樣（顯示卡自我測試拿兩邊的剪影對拍）。
+           * 船身沒撞到也還不能走：船尾的噴射在外框外面，要先把它的光加上去。 */
+          shipPos = pb.xyz + vb * (t - tq);
+          vec3 fw, sd, upv;
+          shipFrame(shipPos, vb, fw, sd, upv);
+          float kv = 2. * R / uShipDim.x;
+          vec3 o = vec3(dot(d0, fw), dot(d0, sd), dot(d0, upv)) / kv + .5 * uShipDim;
+          vec3 dv = vec3(dot(w, fw), dot(w, sd), dot(w, upv)) / kv;
+          vec3 dvs = vec3(abs(dv.x) < 1e-9 ? 1e-9 : dv.x, abs(dv.y) < 1e-9 ? 1e-9 : dv.y, abs(dv.z) < 1e-9 ? 1e-9 : dv.z);
+          vec3 tA = -o / dvs, tB = (uShipDim - o) / dvs;
+          vec3 tmn = min(tA, tB), tmx = max(tA, tB);
+          float sN = max(max(tmn.x, tmn.y), tmn.z), sF = min(min(min(tmx.x, tmx.y), tmx.z), 1.);
+          int ax = 0; float sv = 2.;
+          ivec3 stp = ivec3(dvs.x > 0. ? 1 : -1, dvs.y > 0. ? 1 : -1, dvs.z > 0. ? 1 : -1);
+          if (!(sN > sF || sF < 0. || max(sN, 0.) >= sBody)) {
+            ax = sN > 0. ? (tmn.x >= tmn.y && tmn.x >= tmn.z ? 0 : (tmn.y >= tmn.z ? 1 : 2)) : 0;
+            sv = max(sN, 0.);
+            ivec3 dimI = ivec3(uShipDim + .5);
+            ivec3 cc = clamp(ivec3(floor(o + dv * sv)), ivec3(0), dimI - 1);
+            vec3 tMx = (vec3(cc) + vec3(greaterThan(dvs, vec3(0.))) - o) / dvs;
+            vec3 tDl = abs(1. / dvs);
+            for (int it = 0; it < 400; it++) {
+              shipIdx = texelFetch(uShip, cc, 0).r;
+              if (shipIdx != 0u) break;
+              if (tMx.x < tMx.y) { if (tMx.x < tMx.z) { sv = tMx.x; cc.x += stp.x; tMx.x += tDl.x; ax = 0; } else { sv = tMx.z; cc.z += stp.z; tMx.z += tDl.z; ax = 2; } }
+              else { if (tMx.y < tMx.z) { sv = tMx.y; cc.y += stp.y; tMx.y += tDl.y; ax = 1; } else { sv = tMx.z; cc.z += stp.z; tMx.z += tDl.z; ax = 2; } }
+              if (sv > sF || any(lessThan(cc, ivec3(0))) || any(greaterThanEqual(cc, dimI))) break;
+            }
+          }
+          // 引擎噴射：算到撞到船身（或已經找到的更近的東西）為止；不擋光，所以不動 sBody
+          if (uShipPlume.w > .5 && uShipEngN > 0) {
+            float sNear;
+            vec3 gl = shipPlume(o, dv, 0., min(shipIdx != 0u ? sv : 1., min(sBody, 1.)), pb.w + (t - tq) * iut,
+                                hash12(gl_FragCoord.xy + vec2(float(i) * 3.7, float(b) * 11.3)), sNear);
+            if (sNear < 1.5) {
+              if (uFlags.x > .5) {
+                vec4 ps = mix(p, p1, sNear);
+                gl = shiftColor(gl, 1. / max(dot(ps.xyz, ub.xyz) + ps.w * ub.w, 1e-4));   // 跟船一起紅移、藍移
+              }
+              glowCol += gl; glowS = min(glowS, sNear);
+            }
+          }
+          if (shipIdx == 0u) continue;
+          sHit = sv;
+          shipN = -(ax == 0 ? float(stp.x) * fw : (ax == 1 ? float(stp.y) * sd : float(stp.z) * upv));   // 撞到的那一面朝外的法線（世界座標）
+        }
         if (cube) {
           // 立方體：邊長 2R，照它自己的固有時慢慢自轉。把相對位置轉進立方體的座標，跟六個面求交。
           mat3 M = cubeRot((pb.w + (t - tq) * iut) * CUBE_SPIN + A.z * 1.7);
@@ -394,13 +505,24 @@ void main(){
         float qh = (th - A.x) * A.y;
         if (qh < 0. || qh > float(TRAJ_N - 1)) continue;   // 那一刻它還沒出發，或已經到底了
         vec3 c;
-        if (Bc.a > .5 && !cube) {
+        bool blink = true;
+        if (Bc.a > .5 && Bc.a < 1.5) {
           float mu = sqrt(max(0., 1. - d2 / (R * R)));
           c = Bc.rgb * (.5 + 1.6 * mu * mu);               // 光子只是標記，不做紅移
         } else {
-          if (cube) c = Bc.rgb * face * (.80 + .45 * edge) + vec3(.35) * edge;
+          if (ship) {
+            // 飛船不會自己發光（引擎、燈、舷窗除外）：照亮它的是吸積盤 ⇒ 朝黑洞那一面亮；另外留一點環境光，背光面才看得出形狀
+            vec3 alb = rgb332(shipIdx);
+            if (shipEmit(shipIdx)) c = alb * 2.2;
+            else {
+              vec3 Ld = normalize(uHole[0].xyz - shipPos);
+              c = alb * (.24 + .95 * max(dot(shipN, Ld), 0.) + .10 * max(dot(shipN, -Ld), 0.));
+            }
+            blink = shipIdx == 224u || shipIdx == 28u || shipIdx == 254u;   // 只有航行燈照船上的鐘閃
+          }
+          else if (cube) c = Bc.rgb * face * (.80 + .45 * edge) + vec3(.35) * edge;
           else c = Bc.rgb * (.30 + .70 * sqrt(max(0., 1. - d2 / (R * R))));
-          if (uFlags.w > .5) {
+          if (uFlags.w > .5 && blink) {
             float bp = fract((pb.w + (th - tq) * iut) / uBeaconPeriod);   // 照物體自己的固有時閃
             c *= .45 + 1.5 * smoothstep(0., .06, bp) * (1. - smoothstep(.22, .40, bp));
           }
@@ -417,6 +539,8 @@ void main(){
 
     // 吸積盤：只算到物體前面為止（物體不透明）
     float sEnd = min(1., sBody);
+    // 噴射在擋住它的東西前面才加（不透明度不動）；同一小段裡跟吸積盤誰前誰後不分 —— 貼近盤面時一小段很短，差不出來
+    if (glowS < sEnd) col += trans * glowCol;
     if (uDisk.z > .5) {
       if (uDiskH <= 0.) {
         if (x.y * x1.y < 0.) {

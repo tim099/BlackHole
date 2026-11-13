@@ -9,7 +9,8 @@
  *   speed   相對當地靜止觀察者的速度（0 ≤ v < 1，只有物體用；光一律是 1）
  *   alpha   方向（當地懸停的人量到的角度）：0 = 正對黑洞，π/2 = 切向（順著吸積盤轉的方向），負的 = 逆著轉
  *   mass    物體的質量，單位是「黑洞現在的質量」（只有物體用）
- *   shape   'cube'（預設：自發光的立方體，照自己的固有時慢慢自轉）| 'ball'（球）；只有物體用
+ *   shape   'cube'（預設：自發光的立方體，照自己的固有時慢慢自轉）| 'ball'（球）| 'ship'（飛船：雕刻作品的格子，js/ship.js）；只有物體用
+ *   shipLen 飛船畫出來多長（模擬單位，rs = 1 時就是幾個 rs）；只有 shape = 'ship' 用
  *   pulses  光束一次打幾顆（只有光用）；color 光束顏色
  *
  * 質量會影響什麼：測地線（路徑）不看質量 —— 這是等效原理，也是本檔把物體當「測試粒子」的前提。
@@ -35,6 +36,7 @@
     for (var i = 0; i < this.maxBodies; i++) this.freeRows.push(i);
     this.nextGroup = 1;
     this.colorIdx = 0;
+    this.shipBound = 1.3;          // 飛船包圍球 ÷ 半船長；載入模型後由 app 設成 BH.Ship 算的值（含噴射）
   }
   Bodies.LIGHT_COLORS = LIGHT_COLORS;
 
@@ -110,19 +112,24 @@
     var a = Bodies.aim(holes, spec);
     var t0 = tCam - delay(holes, a.x[0], a.x[1], a.x[2], camPos, camInside);
     if (!isFinite(t0)) t0 = tCam;
+    // 飛船很長：離攝影機比較遠的那半截，光要在 t0 之前出發才到得了 —— 那時船還不存在，剛發射時會缺一角。
+    // 多往前留一個船長的光行時間（顯示卡自我測試量過：沒留的話平直空間裡船長 6 的剪影少 14%）
+    if (spec.kind !== 'light' && spec.shape === 'ship') t0 -= 1.3 * (spec.shipLen || 1.2);
     var tr = Bodies.plan(holes, spec, t0);
     if (!tr || tr.n < 2) return 0;
     var light = spec.kind === 'light';
     var n = light ? Math.max(1, Math.min(8, spec.pulses | 0)) : 1;
     var color = light ? (LIGHT_COLORS[spec.color] || LIGHT_COLORS.green) : PALETTE[this.colorIdx++ % PALETTE.length];
     var group = this.nextGroup++;
-    var cube = !light && spec.shape !== 'ball';
-    // 物體的大小跟著質量走（只是畫出來的大小；路徑跟質量無關）。立方體的 radius 是半邊長。
-    var radius = light ? 0.15 : Math.max(0.14, Math.min(0.6, 0.26 * Math.pow(spec.mass / 0.01, 1 / 3))) * (cube ? 0.8 : 1);
+    var ship = !light && spec.shape === 'ship';
+    var cube = !light && !ship && spec.shape !== 'ball';
+    // 物體的大小跟著質量走（只是畫出來的大小；路徑跟質量無關）。立方體的 radius 是半邊長；飛船的是半個船長（另外給）。
+    var radius = light ? 0.15 : (ship ? 0.5 * (spec.shipLen || 1.2) : Math.max(0.14, Math.min(0.6, 0.26 * Math.pow(spec.mass / 0.01, 1 / 3))) * (cube ? 0.8 : 1));
+    if (ship) color = [0.78, 0.78, 0.74];
     for (var k = 0; k < n; k++) {
       while (this.list.length >= this.maxBodies) this.remove(0);
       var b = {
-        group: group, pulse: k, kind: spec.kind, shape: light ? 'dot' : (cube ? 'cube' : 'ball'), color: color, radius: radius,
+        group: group, pulse: k, kind: spec.kind, shape: light ? 'dot' : (ship ? 'ship' : (cube ? 'cube' : 'ball')), color: color, radius: radius,
         mass: light ? 0 : spec.mass, e: tr.e, absorbed: false,
         tr: k === 0 ? tr : shiftTraj(tr, k * PULSE_GAP),
         row: this.freeRows.shift(), spec: JSON.parse(JSON.stringify(spec)),
@@ -226,11 +233,12 @@
         mn[2] = Math.min(mn[2], tr.Z[j]); mx[2] = Math.max(mx[2], tr.Z[j]);
         if (j === i1) break;
       }
-      var rad = 0.5 * Math.hypot(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]) + b.radius * (b.shape === 'cube' ? 1.75 : 1) + (stride > 1 ? 0.8 : 0.3);
+      // 包圍球要包住整個東西：立方體的外接球是半邊長 × √3；飛船的是半船長 × shipBound（船身外框加上船尾的噴射，由 app 照模型設定）
+      var rad = 0.5 * Math.hypot(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]) + b.radius * (b.shape === 'cube' ? 1.75 : (b.shape === 'ship' ? this.shipBound : 1)) + (stride > 1 ? 0.8 : 0.3);
       out.push({
         A: [b.t0 - tCam, (this.trajN - 1) / (b.t1 - b.t0), b.row, b.radius],
         D: [lo - tCam, hi - tCam, 0, 0],
-        B: [b.color[0], b.color[1], b.color[2], b.kind === 'light' ? 1 : (b.shape === 'cube' ? 2 : 0)],
+        B: [b.color[0], b.color[1], b.color[2], b.kind === 'light' ? 1 : (b.shape === 'cube' ? 2 : (b.shape === 'ship' ? 3 : 0))],
         C: [0.5 * (mn[0] + mx[0]), 0.5 * (mn[1] + mx[1]), 0.5 * (mn[2] + mx[2]), rad]
       });
     }
