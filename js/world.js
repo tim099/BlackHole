@@ -31,7 +31,7 @@
     shipLen: 0.5,        // 船長（rs）
     accel: 0.03,         // 引擎全好時的固有加速度（c²/rs）；4.5 rs 以內光靠它已經懸停不住
     boost: 2.2, boostCost: 10, energyMax: 100, energyRegen: 7,
-    laser: { gap: 0.55, cost: 9, range: 22, radius: 3, depth: 50, tol: 0.012, beam: 0.6 },      // beam：開一次火的光束持續多久（跟 gap 差不多 ⇒ 按住就是連續的一道）
+    laser: { gap: 0.55, cost: 9, range: 22, radius: 3, depth: 50, tol: 0.012, beam: 0.6 },      // beam：開一次火的光束持續多久（照開火那艘船自己的鐘；比 gap 長一點 ⇒ 按住就是連續的一道）
     kinetic: { gap: 1.6, cost: 6, speed: 0.45, range: 55, solveRange: 40, base: 5, gain: 7, max: 14, tol: 0.02 },
     missile: { gap: 5, stock: 6, reload: 25, speed: 0.15, accel: 0.2, burn: 8, life: 55, blast: 14, cone: 0.9, fuse: 0.04, guard: 0.03, minRange: 2, maxRange: 32 },
     aimTol: 0.1,         // 射擊解：預測的最近距離小於這個才算有解（rs）
@@ -352,8 +352,21 @@
     } else {
       var tr = P.trace(holes, st, { tSpan: w.range, rMax: 400, frac: 0.012, maxSteps: kind === 'laser' ? 8000 : 30000 });
       if (tr.n < 2) return null;
-      out = { id: this.nextId++, kind: kind, team: sh.team, owner: sh, tr: tr, dead: false, tHit: null, beam: null };
-      if (kind === 'laser' && w.beam > 0) out.beam = this.beamTail(sh, part, st, w);
+      out = { id: this.nextId++, kind: kind, team: sh.team, owner: sh, tr: tr, dead: false, tHit: null, beam: null, part: part, tau0: sh.tau };
+      if (kind === 'laser' && w.beam > 0) {
+        // 剛開火的這一刻光束還沒有長度：先拿「再過一下下」的那顆光子當尾端，之後每一格換成當下射出去的那一顆（見 step 的 2.5）
+        var bt = this.beamTail(sh, part, st[3], 0.02), prev = sh.lastBeam;
+        if (bt) {
+          out.beam = { dur: bt.dur, tail: bt.tail, live: true, linked: false, linkedStart: false };
+          if (prev && prev.beam && !prev.beam.linked && sh.tau - prev.tau0 <= 1.2 * w.beam + 0.05) {
+            // 上一段還在射（或才剛射完）：接起來 —— 上一段的最後一顆光子就是這一段的第一顆，中間沒有縫、也不重疊
+            prev.beam.tail = tr; prev.beam.dur = st[3] - prev.tr.T[0]; prev.beam.linked = true; prev.beam.live = false;
+            out.beam.linkedStart = true;
+            this.events.push({ type: 'beam', shot: prev });
+          }
+        }
+        sh.lastBeam = out.beam ? out : null;
+      }
       this.shots.push(out);
       this.events.push({ type: 'shot', shot: out });
     }
@@ -362,16 +375,20 @@
     return out;
   };
 
-  /* 雷射不是一顆光子，是持續 beam 這麼久的一段光束。打不打得中照第一顆光子（上面那條 tr）算；
-   * 這裡另外算「最後一顆」：船照現在的軌道滑到 beam 之後的位置，機頭不動，從那時的發射口射出去。
-   * 畫面上的光束就是這兩顆光子之間連起來的那一段（中間的光子各自從當時的發射口出發，所以光束的尾端一直接在發射口上）。 */
-  World.prototype.beamTail = function (sh, part, st, w) {
-    var holes = this.holes, sT = Float64Array.from(sh.s);
-    G.advanceTo(holes, sT, sh.s[3] + w.beam, null, 0, this.wall);
+  /* 雷射不是一顆光子，是持續 beam 這麼久（照開火那艘船自己的鐘）的一段光束。打不打得中照第一顆光子（上面那條 tr）算。
+   * 畫面上的光束 ＝ 第一顆光子與「最後一顆光子」之間連起來的那一段；中間的光子各自從當時的發射口出發，
+   * 所以光束的尾端一直接在發射口上。「最後一顆」是誰：
+   *   還在射 ⇒ 就是這一格當下從發射口射出去的那一顆（每一格換一次：船轉了頭、推了引擎都跟得上）；
+   *   下一發接著射 ⇒ 換成下一段的第一顆光子（同一條路），兩段接得剛剛好；
+   *   射完了沒有下一發 ⇒ 停在最後換的那一顆。
+   * 這裡做的事：船從現在的狀態再滑 tauLeft 的固有時（0 ＝ 就是現在）、機頭不動，從那時的發射口射一顆光子，回傳它的路與「比第一顆晚多久出發」。 */
+  World.prototype.beamTail = function (sh, part, t0, tauLeft) {
+    var holes = this.holes, sT = Float64Array.from(sh.s), w = this.cfg.laser;
+    if (tauLeft > 1e-9) G.advanceTau(holes, sT, tauLeft, null, 0, this.wall);
     var st2 = G.launch(holes, sT, sh.fwd, 1, this.fromModel(sh, part.muzzle, sT));
-    if (!st2 || !(st2[3] > st[3])) return null;
+    if (!st2 || !(st2[3] > t0 + 1e-6)) return null;
     var tail = P.trace(holes, st2, { tSpan: w.range + 2, rMax: 400, frac: 0.012, maxSteps: 8000 });
-    return tail.n >= 2 ? { dur: st2[3] - st[3], tail: tail } : null;
+    return tail.n >= 2 ? { dur: st2[3] - t0, tail: tail } : null;
   };
 
   /* 這一格的時間裡，一個東西從 A0 走到 A1、船從 p0 走到 p1：有沒有碰到船身的格子。
@@ -715,6 +732,17 @@
       if (sh.team !== 'enemy' || !sh.alive) continue;
       var ut = G.velocity4(holes, sh.s)[3], cmd = this.think(sh, dtc / Math.max(ut, 1e-6));
       sh.tau += G.advanceTo(holes, sh.s, this.t, cmd.dir, cmd.a, this.wall);
+    }
+
+    // 2.5 還在射的那一段光束：尾端換成這一格當下從發射口射出去的那顆光子（見 beamTail）
+    for (i = 0; i < this.ships.length; i++) {
+      sh = this.ships[i];
+      var lb = sh.lastBeam;
+      if (!lb || !lb.beam || !lb.beam.live || sh.tau === lb.tau0) continue;      // tau 沒動 ＝ 這一格才剛射的
+      if (!sh.alive) { lb.beam.live = false; continue; }
+      var nb = this.beamTail(sh, lb.part, lb.tr.T[0], 0);
+      if (nb) { lb.beam.tail = nb.tail; lb.beam.dur = nb.dur; this.events.push({ type: 'beam', shot: lb }); }
+      if (sh.tau - lb.tau0 >= cfg.laser.beam) lb.beam.live = false;              // 射滿了：就停在這一顆
     }
 
     // 3. 飛彈：自己推、自己轉；碰到船身的格子就炸，擦身而過（很近）也炸

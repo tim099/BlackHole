@@ -470,32 +470,61 @@ void main(){
         if (beam) {
           /* 光束：不是一個點，是「第一顆光子」到「最後一顆光子」之間的一段。晚 dl 出發的那顆光子，此刻在 第一顆的位置 + dl × E
            * （E 在軌跡貼圖的第三列，由 js/bodies.js 的 beamFrame 算好；發射的船在動，所以 E 不是單純的「往後」）。
-           * 這一小段光線上的點相對第一顆光子是 d0 + w s，所以要找的是兩條線段最近的地方：s ∈ [0, 1]、dl ∈ [0, 持續多久]。
+           * 這一小段光線上的點相對第一顆光子是 d0 + w s，所以要找的是兩條線最近的地方：s ∈ [0, 1]、u = dl ÷ 持續多久 ∈ [0, 1]。
+           * 做兩遍：第一遍用這一小段起點那一刻的資料粗估（順便篩掉離得遠的）；第二遍改用「最近的那一刻」的資料重算
+           *   —— 光束的路是彎的，相鄰兩小段各用各的起點去推會對不上，交界上就是一條縫。
            * 找到之後再看那顆光子那時候存不存在：還沒出發、或已經到底（打中東西、飛完射程）的就不亮。
-           * 最近的地方落在這一小段的外面 ⇒ 留給隔壁那一小段算（不然交界上會加兩次）。光束不擋光，只把光加上去。 */
-          vec4 er = trajAt(row + 2, q0);
-          float dur = max(D.z, 1e-4), lam = max(er.w, .05);
-          vec3 eb = er.xyz * dur;
+           * 光束不擋光，只把光加上去，所以同一個地方不能被算兩次、也不能漏：
+           *   光線這一側 —— 最近點落在這一小段的頭尾附近時，跟隔壁那一小段各算一部分（兩邊的比重加起來是 1）；
+           *   光束這一側 —— 連續開火時一段接一段（D.w 的 bit 0：前端接著上一段；bit 1：尾端接著下一段），
+           *                 接起來的地方不畫圓頭，兩段在一小段範圍裡一邊淡出、一邊淡入。 */
+          float dur = max(D.z, 1e-4), T1 = A.x + float(TRAJ_N - 1) / A.y, segLen = sqrt(seg2);
+          int lk = int(D.w + .5);
+          bool lkA = (lk & 1) != 0, lkB = (lk & 2) != 0;
+          vec3 eb = trajAt(row + 2, q0).xyz * dur;
           float ba = max(dot(w, w), 1e-12), be = max(dot(eb, eb), 1e-12), bb = dot(w, eb), bc = dot(w, d0), bf = dot(eb, d0);
           float den = ba * be - bb * bb;
-          float s1 = den > 1e-6 * ba * be ? clamp((bb * bf - bc * be) / den, 0., 1.) : 0.;
+          float s1 = den > 1e-6 * ba * be ? clamp((bb * bf - bc * be) / den, 0., 1.) : clamp(-bc / ba, 0., 1.);
           float u = clamp((bb * s1 + bf) / be, 0., 1.);
-          float T1 = A.x + float(TRAJ_N - 1) / A.y;
-          float ts = t + dtS * clamp(-(bc - bb * u) / ba, 0., 1.);
-          float uLo = max(0., (ts - T1) / (lam * dur)), uHi = min(1., (ts - A.x) / dur);
-          if (uHi < uLo) continue;
-          u = clamp(u, uLo, uHi);
-          float sb = -(bc - bb * u) / ba;
-          if (sb < 0. || sb >= 1.) continue;
-          ts = t + dtS * sb;
-          if (ts - u * dur < A.x - .03 || ts - lam * u * dur > T1 + .03) continue;
-          vec3 qb = d0 + w * sb - eb * u;
+          s1 = clamp(-(bc - bb * u) / ba, 0., 1.);
+          vec3 qb = d0 + w * s1 - eb * u;
+          float Rc = max(R, .9 * pix * length(x + seg * s1 - uCamPos));      // 遠的時候至少畫一個像素寬，亮度照比例降
+          float lim = 5. * Rc + .08 * segLen + .06;
+          if (dot(qb, qb) > lim * lim) continue;
+          // 第二遍：查「最近的那一刻」的第一顆光子在哪、往哪飛、E 是多少
+          float tsr = t + dtS * s1;
+          float q2 = clamp((tsr - A.x) * A.y, 0., float(TRAJ_N - 1)), tq2 = A.x + q2 / A.y;
+          vec4 pb2 = trajAt(row, q2), ub2 = trajAt(row + 1, q2), er2 = trajAt(row + 2, q2);
+          vec3 vb2 = ub2.xyz / max(ub2.w, 1e-6);
+          vec3 w2 = seg - vb2 * dtS, dA = x - (pb2.xyz + vb2 * (t - tq2));
+          float lam = max(er2.w, .05), hu = .04 / dur;                       // hu：接頭處淡入淡出的範圍（出發時刻差 0.04）
+          eb = er2.xyz * dur;
+          ba = max(dot(w2, w2), 1e-12); be = max(dot(eb, eb), 1e-12); bb = dot(w2, eb); bc = dot(w2, dA); bf = dot(eb, dA);
+          den = ba * be - bb * bb;
+          float sb = den > 1e-6 * ba * be ? (bb * bf - bc * be) / den : -bc / ba;      // 先不設限（兩條直線最近的地方）
+          u = (bb * sb + bf) / be;
+          float uLo = 0., uHi = 1.;
+          for (int it = 0; it < 2; it++) {
+            float ts = t + dtS * clamp(sb, 0., 1.);
+            uLo = (ts - T1) / (lam * dur); uHi = (ts - A.x) / dur;           // 比 uLo 早出發的已經到底了；比 uHi 晚出發的還沒射出來
+            float uMin = max(lkA ? -hu : 0., uLo), uMax = min(lkB ? 1. + hu : 1., uHi);
+            if (uMax < uMin) { u = 1e9; break; }
+            u = clamp(u, uMin, uMax);
+            sb = -(bc - bb * u) / ba;                                        // 給定 u，光線上最近的地方（不夾：落在這一小段外面的歸隔壁）
+          }
+          if (u > 1e8) continue;
+          float hS = min(.02, .25 * segLen);
+          float wgt = (i == 0 ? step(0., sb) : clamp((sb * segLen + hS) / (2. * hS), 0., 1.)) * clamp(((1. - sb) * segLen + hS) / (2. * hS), 0., 1.);
+          if (lkA && uLo < -hu) wgt *= clamp((u + hu) / (2. * hu), 0., 1.);
+          if (lkB && uHi > 1. + hu) wgt *= clamp((1. + hu - u) / (2. * hu), 0., 1.);
+          if (wgt <= 0.) continue;
+          qb = dA + w2 * sb - eb * u;
           float d2b = dot(qb, qb);
-          float Rc = max(R, .9 * pix * length(x + seg * sb - uCamPos));      // 遠的時候至少畫一個像素寬，亮度照比例降
+          Rc = max(R, .9 * pix * length(x + seg * sb - uCamPos));
           if (d2b < 14. * Rc * Rc) {
             float core = exp(-d2b / (Rc * Rc)), halo = exp(-d2b / (5. * Rc * Rc));
-            glowCol += (Bc.rgb * (1.5 * core + .30 * halo) + vec3(1.3) * core * core) * pow(R / Rc, .7);
-            glowS = min(glowS, sb);
+            glowCol += (Bc.rgb * (1.5 * core + .30 * halo) + vec3(1.3) * core * core) * (pow(R / Rc, .7) * wgt);
+            glowS = min(glowS, clamp(sb, 0., .999));      // 最近點在這一小段尾端外面一點點（跟隔壁各算一部分的那一截）也要算進來：後面「有沒有被擋住」比的是 < 1
           }
           continue;
         }

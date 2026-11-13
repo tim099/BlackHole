@@ -578,6 +578,53 @@
           '船速 (' + vs.map(function (x2) { return x2.toFixed(3); }).join(', ') + ')、光 (' + nn.map(function (x2) { return x2.toFixed(3); }).join(', ') + ')；光束持續 ' + shot.beam.dur.toFixed(3) + '。所以光束的尾端一直接在還在動的發射口上'));
         out.push(row('戰鬥・光束：最後一顆光子比第一顆晚多久到終點（÷ 持續時間）', bf.lam, 1 - (vs[0] * nn[0] + vs[1] * nn[1] + vs[2] * nn[2]), 1e-6, 'abs', '解析值 1 − 船速·光的方向（船追著自己的光跑，光束在路上被壓短）'));
         out.push(row('戰鬥・光束・反向對照：船不動的話 E 就只是「往後」，跟上面差多少（> 0.3 記 1）', Math.hypot(vs[0], vs[1], vs[2]) > 0.3 ? 1 : 0, 1, 0, 'abs', '差的就是船速 ' + Math.hypot(vs[0], vs[1], vs[2]).toFixed(3) + ' c'));
+
+        // 連續開火：一段接一段。船以 0.5 c 飛、一邊轉頭一邊按住開火 3 的固有時（能量給到用不完）
+        var wc = new W(H0, { empty: true, cfg: { wallR: 0, energyRegen: 100 } });
+        var sc = wc.addShip('player', P.launch(H0, [0, 0, 0], G.norm([0.6, 0, 0.8]), 0.5, 'ball'), [1, 0, 0], [0, 1, 0], { loadout: 'L', cool: 0 });
+        wc.player = sc;
+        var shots = [], muzzleErr = 0, liveSeen = 0, n3, j3;
+        for (n3 = 0; n3 < 60; n3++) {
+          wc.rotatePlayer(0.02, 0, 0);
+          wc.step(0.05, { fire: true, weapon: 'laser' });
+          var ev3 = wc.takeEvents();
+          for (j3 = 0; j3 < ev3.length; j3++) if (ev3[j3].type === 'shot') shots.push(ev3[j3].shot);
+          var lb = sc.lastBeam;
+          if (lb && lb.beam.live && sc.tau > lb.tau0) {      // 還在射的那一段：尾端那顆光子就是這一格從發射口射出去的
+            var mz = wc.fromModel(sc, lb.part.muzzle), tl = lb.beam.tail;
+            muzzleErr = Math.max(muzzleErr, Math.hypot(tl.X[0] - mz[0], tl.Y[0] - mz[1], tl.Z[0] - mz[2]) + Math.abs(tl.T[0] - wc.t));
+            liveSeen++;
+          }
+        }
+        var unlinked = 0, durErr = 0, notSame = 0, gamC = G.velocity4(H0, sc.s)[3];
+        for (j3 = 0; j3 + 1 < shots.length; j3++) {
+          if (!shots[j3].beam.linked || !shots[j3 + 1].beam.linkedStart) unlinked++;
+          if (shots[j3].beam.tail !== shots[j3 + 1].tr) notSame++;
+          durErr = Math.max(durErr, Math.abs(shots[j3].beam.dur - (shots[j3 + 1].tr.T[0] - shots[j3].tr.T[0])));
+        }
+        out.push(row('戰鬥・光束：按住開火，前後兩段沒有接起來的有幾處', shots.length >= 4 ? unlinked + notSame : NaN, 0, 0, 'abs',
+          '射了 ' + shots.length + ' 段；每一段的「最後一顆光子」就是下一段的第一顆（同一條路）。兩段之間隔 ' + ((shots[1].tr.T[0] - shots[0].tr.T[0]) / gamC).toFixed(3) + '（船的鐘）＝ ' + (shots[1].tr.T[0] - shots[0].tr.T[0]).toFixed(3) + '（外面的鐘）'));
+        out.push(row('戰鬥・光束：每一段持續多久 − 到下一段開火隔多久（差多少就是接頭的縫或重疊）', durErr, 0, 0, 'abs', '修之前：每段固定 0.6（外面的鐘），間隔卻是 0.55 × 船的時間流速 ＋ 一格，接頭會空一截'));
+        // 接頭：中間那一段的尾端（第一顆的位置 + 持續時間 × E）跟下一段的第一顆光子，同一時刻要在同一個地方
+        var sA = shots[1], sB = shots[2], bfA = Bd.beamFrame(sA.tr, sA.beam, 256), jErr = 0, jN = 0;
+        for (j3 = 0; j3 < 256; j3++) {
+          var Tj = sA.tr.T[0] + (sA.tr.T[sA.tr.n - 1] - sA.tr.T[0]) * j3 / 255;
+          if (Tj < sB.tr.T[0] + 0.01 || Tj > sB.tr.T[sB.tr.n - 1]) continue;
+          var hA = P.sampleAt(sA.tr, Tj), hB = P.sampleAt(sB.tr, Tj);
+          jErr = Math.max(jErr, Math.hypot(hA.x + bfA.fwd[4 * j3] * sA.beam.dur - hB.x, hA.y + bfA.fwd[4 * j3 + 1] * sA.beam.dur - hB.y, hA.z + bfA.fwd[4 * j3 + 2] * sA.beam.dur - hB.z));
+          jN++;
+        }
+        out.push(row('戰鬥・光束：接頭兩邊在同一時刻差多遠（rs）', jN ? jErr : NaN, 0, 1e-6, 'abs', '比了 ' + jN + ' 個時刻；船在這一段裡轉了 ' + (0.02 * (sB.tr.T[0] - sA.tr.T[0]) / gamC / 0.05).toFixed(2) + ' 弧度（光束是折線，但接得上）'));
+        out.push(row('戰鬥・光束：還在射的那一段，尾端那顆光子離發射口多遠（位置 ＋ 時刻的差）', liveSeen ? muzzleErr : NaN, 0, 1e-9, 'abs', '檢查了 ' + liveSeen + ' 格：每一格都換成當下射出去的那一顆，所以轉頭的時候光束不會跟機頭脫節'));
+        // 只點一下：射滿 beam 這麼久（船的鐘）就停
+        var w1 = new W(H0, { empty: true, cfg: { wallR: 0 } });
+        var s1b = w1.addShip('player', P.launch(H0, [0, 0, 0], G.norm([0.6, 0, 0.8]), 0.5, 'ball'), [1, 0, 0], [0, 1, 0], { loadout: 'L', cool: 0 });
+        w1.player = s1b;
+        w1.step(0.05, { fire: true, weapon: 'laser' });
+        var one = w1.takeEvents().filter(function (e3) { return e3.type === 'shot'; })[0].shot;
+        for (n3 = 0; n3 < 30; n3++) w1.step(0.05, {});
+        out.push(row('戰鬥・光束：只點一下，這一段照船自己的鐘持續多久', one.beam.dur / G.velocity4(H0, s1b.s)[3], W.CFG.laser.beam, 0.0501, 'abs',
+          '設定 ' + W.CFG.laser.beam + '，一格 0.05 ⇒ 落在 ' + W.CFG.laser.beam + '～' + (W.CFG.laser.beam + 0.05).toFixed(2) + '；外面的鐘看是 ' + one.beam.dur.toFixed(3) + '。還在射 = ' + one.beam.live + '、有接下一段 = ' + one.beam.linked));
       })();
     })();
 

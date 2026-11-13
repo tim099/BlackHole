@@ -284,6 +284,10 @@
         if (v) { if (e.ship === pl) this.applyCells(v, e.cells, e.paint); else v.queue.push({ t: e.t, cells: e.cells, paint: e.paint }); }
         if (e.ship === pl) this.flash = 1;
         this.sparks(e);
+      } else if (e.type === 'beam') {
+        // 光束的尾端換了（還在射的那一段每一格換一次；下一發接上來時換成下一段的第一顆光子）
+        b = this.shotBody[e.shot.id];
+        if (b && bodies.list.indexOf(b) >= 0) { b.beam = e.shot.beam; bodies.upload(b); }
       } else if (e.type === 'frag') {
         // 玩家自己的船毀了之後時間就停了，那幾截的光永遠到不了，不用放
         if (!(e.frag.wreck && e.ship === pl)) this.addFragView(e.frag);

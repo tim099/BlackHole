@@ -22,7 +22,8 @@
  *             有人開的船（shape = 'pilot'）另外帶機頭、上方、引擎出力、被打中的閃光四個欄位，一樣照座標時間存、
  *             照光經過的那一刻查；飛彈（shape = 'ball'）只有位置與速度。
  *   addTraced 已經算好的一條軌跡（彈丸、爆炸的火球、破片）：不會自動接長，走完就收。
- *             光束（shape = 'beam'）：tr 是第一顆光子的路，另外帶 beam = { dur, tail }（最後一顆光子的路）。
+ *             光束（shape = 'beam'）：tr 是第一顆光子的路，另外帶 beam = { dur, tail, linkedStart, linked }
+ *             （tail ＝ 最後一顆光子的路、晚 dur 出發；linkedStart／linked ＝ 前端／尾端接著另一段光束，接頭不畫圓頭）。
  *   用格子畫的東西（shape = 'chunk'：破片、飛彈、彈丸）：slot ＝ 格子在貼圖的哪個船位、pivot ＝ 物體的位置對到模型座標的哪一點、
  *             kv ＝ 一格多長、radius ＝ 包住它的球；朝向來自 frameAt(t)（或歷史裡的 FX…GZ 欄位），都沒有就機頭朝飛行方向。
  */
@@ -383,11 +384,11 @@
       }
       // 包圍球要包住整個東西：立方體的外接球是半邊長 × √3；飛船的是半船長 × shipBound（船身外框加上船尾的噴射，由 app 照模型設定）
       var isShip = b.shape === 'ship' || b.shape === 'pilot', sd = this.shipDims;
-      var rad = 0.5 * Math.hypot(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]) + b.radius * (b.shape === 'cube' ? 1.75 : (isShip ? this.shipBound : 1)) + (stride > 1 ? 0.8 : 0.3) + (beam ? 1.2 * b.beam.dur : 0);
+      var rad = 0.5 * Math.hypot(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]) + b.radius * (b.shape === 'cube' ? 1.75 : (isShip ? this.shipBound : 1)) + (stride > 1 ? 0.8 : 0.3) + (beam ? 2 * b.beam.dur + 0.1 : 0);
       var kind = beam ? 5 : (b.shape === 'chunk' ? 6 : (b.kind === 'light' ? 1 : (b.shape === 'cube' ? 2 : (b.shape === 'ship' ? 3 : (b.shape === 'pilot' ? 4 : 0)))));
       out.push({
         A: [b.t0 - tCam, (this.trajN - 1) / (b.t1 - b.t0), b.row, b.radius],
-        D: [lo - tCam, (beam ? Math.min(tCam, hi + 2.2 * b.beam.dur) : hi) - tCam, beam ? b.beam.dur : (b.slot || 0), b.engMask == null ? this.shipEngMask : b.engMask],
+        D: [lo - tCam, (beam ? Math.min(tCam, hi + 2.2 * b.beam.dur) : hi) - tCam, beam ? b.beam.dur : (b.slot || 0), beam ? ((b.beam.linkedStart ? 1 : 0) | (b.beam.linked ? 2 : 0)) : (b.engMask == null ? this.shipEngMask : b.engMask)],
         B: [b.color[0], b.color[1], b.color[2], kind],
         C: [0.5 * (mn[0] + mx[0]), 0.5 * (mn[1] + mx[1]), 0.5 * (mn[2] + mx[2]), rad],
         E: b.shape === 'chunk' ? [b.pivot[0], b.pivot[1], b.pivot[2], b.kv] : (isShip ? [sd[0] / 2, sd[1] / 2, sd[2] / 2, 2 * b.radius / sd[0]] : [0, 0, 0, 1])

@@ -959,6 +959,62 @@
       rows.push(T.row('顯示卡・戰鬥・反向對照：當成「發射的船沒在動」的話，尾端會差幾個像素（> 8 記 1）', Math.hypot(ps[0] - p1[0], ps[1] - p1[1]) > 8 ? 1 : 0, 1, 0, 'abs',
         '那樣的尾端在 (' + ps[0].toFixed(1) + ', ' + ps[1].toFixed(1) + ')，差 ' + Math.hypot(ps[0] - p1[0], ps[1] - p1[1]).toFixed(1) + ' 像素'));
     })();
+
+    // 6. 接縫：三段接起來的光束，中間剛好跨過光線分段的交界（平直空間裡每一小段光線長 12，交界在離攝影機 24 的地方）。
+    //    沿著光束的中線量亮度：兩個接頭與那個交界都不該有暗線。反向對照：三段之間各留 1 的空隙、不接，就量得到暗的地方。
+    (function () {
+      var cam = cf.pos, Lk = G.norm([-cam[0], -cam[1], -cam[2]]), Sd = G.norm(G.cross(Lk, [0, 1, 0]));
+      var n = G.norm([0.5 * Lk[0] + 0.866 * Sd[0], 0.5 * Lk[1] + 0.866 * Sd[1], 0.5 * Lk[2] + 0.866 * Sd[2]]);      // 光束跟視線夾 60°
+      var Pm = [cam[0] + 24 * Lk[0], cam[1] + 24 * Lk[1], cam[2] + 24 * Lk[2]], A = [Pm[0] - 5 * n[0], Pm[1] - 5 * n[1], Pm[2] - 5 * n[2]], d = 0.6;
+      var fr = G.cameraFrame(H0, cam, [0, 0, 0], Lk, [0, 1, 0]);
+      function ray(t) { var s = P.launch(H0, A, n, 1, 'light'); s[3] = t; return P.trace(H0, s, { tSpan: 12, rMax: 400, frac: 0.012, maxSteps: 4000 }); }
+      function seenAt(te) {            // 在 te 出發的那顆光子，攝影機「現在」看到它在哪
+        var lo = te, hi = 0;
+        for (var j = 0; j < 60; j++) {
+          var mid = 0.5 * (lo + hi), k = mid - te;
+          if (mid + Math.hypot(A[0] + n[0] * k - cam[0], A[1] + n[1] * k - cam[1], A[2] + n[2] * k - cam[2]) < 0) lo = mid; else hi = mid;
+        }
+        return [A[0] + n[0] * (lo - te), A[1] + n[1] * (lo - te), A[2] + n[2] * (lo - te)];
+      }
+      function toPx3(p) { var pj = G.project(H0, fr, p); return [(pj[0] / pj[2] / tanF * size + size) / 2 - 0.5, (pj[1] / pj[2] / tanF * size + size) / 2 - 0.5]; }
+      function run(gap, linked) {
+        var t0 = -29 - 1.5 * d - gap, heads = [], k;
+        for (k = 0; k < 3; k++) heads.push(ray(t0 + k * (d + gap)));
+        bodies.clear();
+        for (k = 0; k < 3; k++) {
+          bodies.addTraced(heads[k], { kind: 'light', color: [1, 1, 1], radius: 0.08, linger: 1e9,
+            beam: { dur: d, tail: linked && k < 2 ? heads[k + 1] : ray(t0 + k * (d + gap) + d), linked: linked && k < 2, linkedStart: linked && k > 0 } });
+        }
+        bodies.update(H0, 0, cam, false);
+        var px3 = renderer.renderToPixels({
+          tanFov: tanF, camPos: fr.pos, P: fr.P, camInside: false, energyTest: false, holes: H0, far: 60, maxSteps: 300, stepScale: 1,
+          disk: { on: false, rin: 3, rout: 12, brightness: 1 }, diskTime: 0, flags: [0, 0, 0, 0], exposure: 0.2, beaconPeriod: 2, debug: false, plume: false, bodies: bodies.uniforms(0, false)
+        }, size);
+        function lum(xx, yy) {
+          xx = Math.round(xx); yy = Math.round(yy);
+          if (xx < 0 || yy < 0 || xx >= size || yy >= size) return 0;
+          var o = (yy * size + xx) * 4;
+          return Math.pow((px3[o] + px3[o + 1] + px3[o + 2]) / 765, 2.2);
+        }
+        // 從最早出發的那顆光子到最晚的那顆，頭尾各去掉一成；每隔 1/4 個像素取一次「橫著掃過光束，最亮的那一點」
+        var a = toPx3(seenAt(t0)), b = toPx3(seenAt(t0 + 3 * d + 2 * gap)), L = Math.hypot(b[0] - a[0], b[1] - a[1]), ax = [(b[0] - a[0]) / L, (b[1] - a[1]) / L], vals = [];
+        for (var s = 0.1 * L; s <= 0.9 * L; s += 0.25) {
+          var best = 0;
+          for (var e = -3; e <= 3; e += 0.5) best = Math.max(best, lum(a[0] + ax[0] * s - ax[1] * e, a[1] + ax[1] * s + ax[0] * e));
+          vals.push(best);
+        }
+        var sorted = vals.slice().sort(function (p2, q2) { return p2 - q2; }), mid2 = toPx3(Pm);
+        var iMin = vals.indexOf(sorted[0]), j1 = toPx3(seenAt(t0 + d + gap)), j2 = toPx3(seenAt(t0 + 2 * d + gap));
+        function along(q) { return (q[0] - a[0]) * ax[0] + (q[1] - a[1]) * ax[1]; }
+        return { min: sorted[0], med: sorted[sorted.length >> 1], max: sorted[sorted.length - 1], L: L, n: vals.length, at: along(mid2), minAt: 0.1 * L + 0.25 * iMin, j1: along(j1), j2: along(j2) };
+      }
+      var ok = run(0, true), bad = run(1.0, false);
+      rows.push(T.row('顯示卡・戰鬥：接起來的三段光束，沿線最暗的地方 ÷ 中間值（沒有接縫 ⇒ 接近 1）', ok.med > 0 ? ok.min / ok.med : NaN, 1, 0.15, 'abs',
+        '光束在畫面上長 ' + ok.L.toFixed(0) + ' 像素，量了 ' + ok.n + ' 個點：最暗 ' + ok.min.toFixed(3) + '、中間值 ' + ok.med.toFixed(3) + '、最亮 ' + ok.max.toFixed(3) + '（線性亮度）；最暗的地方在沿線第 ' + ok.minAt.toFixed(1) + ' 個像素。光線分段的交界在第 ' + ok.at.toFixed(1) + ' 個像素，兩個接頭在第 ' + ok.j1.toFixed(1) + '、' + ok.j2.toFixed(1) + ' 個像素'));
+      rows.push(T.row('顯示卡・戰鬥：同一條光束，沿線最亮的地方 ÷ 中間值（沒有被算兩次 ⇒ 接近 1）', ok.med > 0 ? ok.max / ok.med : NaN, 1, 0.15, 'abs'));
+      rows.push(T.row('顯示卡・戰鬥・反向對照：三段之間各留 1 的空隙、不接 ⇒ 沿線量得到暗的地方（最暗 ÷ 中間值 < 0.3 記 1）', bad.med > 0 && bad.min / bad.med < 0.3 ? 1 : 0, 1, 0, 'abs',
+        '最暗 ' + bad.min.toFixed(3) + '、中間值 ' + bad.med.toFixed(3)));
+    })();
     bodies.clear();
   }
 
