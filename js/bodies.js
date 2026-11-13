@@ -21,7 +21,10 @@
  *   addLive   自己會動的東西：不是測地線，軌跡是「到現在為止實際走過的路」，每一格由外面接長。
  *             有人開的船（shape = 'pilot'）另外帶機頭、上方、引擎出力、被打中的閃光四個欄位，一樣照座標時間存、
  *             照光經過的那一刻查；飛彈（shape = 'ball'）只有位置與速度。
- *   addTraced 已經算好的一條軌跡（光彈、爆炸的火球）：不會自動接長，走完就收。
+ *   addTraced 已經算好的一條軌跡（彈丸、爆炸的火球、破片）：不會自動接長，走完就收。
+ *             光束（shape = 'beam'）：tr 是第一顆光子的路，另外帶 beam = { dur, tail }（最後一顆光子的路）。
+ *   用格子畫的東西（shape = 'chunk'：破片、飛彈、彈丸）：slot ＝ 格子在貼圖的哪個船位、pivot ＝ 物體的位置對到模型座標的哪一點、
+ *             kv ＝ 一格多長、radius ＝ 包住它的球；朝向來自 frameAt(t)（或歷史裡的 FX…GZ 欄位），都沒有就機頭朝飛行方向。
  */
 (function (root) {
   'use strict';
@@ -42,6 +45,10 @@
     for (var i = 0; i < this.maxBodies; i++) this.freeRows.push(i);
     this.nextGroup = 1;
     this.colorIdx = 0;
+    this.tight = false;            // 戰鬥模式：小東西（光束、彈丸、飛彈、破片）沒被黑洞擋到時，只交出「現在看到的那一刻」前後一小段（著色器快很多；代價是它們沒有繞過黑洞的重影）
+    this.lookback = LOOKBACK;      // 見上面 LOOKBACK；戰鬥模式的戰場比較大，進場時會放長
+    this.shipDims = [1, 1, 1];     // 飛船模型幾格（app 載入模型後設定）：船的位置對到模型正中間、一格 ＝ 船長 ÷ nx
+    this.shipEngMask = 255;        // 船自己的引擎（遮罩）：沒指定遮罩的船用這個
     this.shipBound = 1.3;          // 飛船包圍球 ÷ 半船長；載入模型後由 app 設成 BH.Ship 算的值（含噴射）
   }
   Bodies.LIGHT_COLORS = LIGHT_COLORS;
@@ -89,6 +96,12 @@
     return dist + Math.max(0, 2 * h.rs * Math.log((rc - h.rs) / (rb - h.rs)));
   }
   Bodies.delay = delay;
+  // 點 c 到線段 a → (p.x, p.y, p.z) 的距離
+  function segDist(a, p, c) {
+    var dx = p.x - a[0], dy = p.y - a[1], dz = p.z - a[2], L2 = dx * dx + dy * dy + dz * dz;
+    var w = L2 > 0 ? Math.max(0, Math.min(1, ((c[0] - a[0]) * dx + (c[1] - a[1]) * dy + (c[2] - a[2]) * dz) / L2)) : 0;
+    return Math.hypot(a[0] + dx * w - c[0], a[1] + dy * w - c[1], a[2] + dz * w - c[2]);
+  }
 
   function shiftTraj(tr, dt) {
     var o = {};
@@ -102,11 +115,56 @@
     var rs = P.resample(b.tr, this.trajN);
     b.t0 = rs.t0; b.t1 = rs.t1;
     if (this.renderer) this.renderer.setTrajRow(b.row, rs.pos, rs.vel);
-    if (b.shape === 'pilot' && this.renderer) {
-      var fr = resampleFrame(b.tr, this.trajN);
+    if (b.shape === 'beam') {
+      var bf = beamFrame(b.tr, b.beam, this.trajN);
+      b.lam = bf.lam;
+      if (this.renderer) this.renderer.setFrameRow(b.row, bf.fwd, bf.up);
+    } else if ((b.shape === 'pilot' || b.shape === 'chunk') && this.renderer) {
+      // 一塊格子沒有朝向資料時放 0：著色器看到 0 就讓機頭朝飛行方向（這一列可能留著上一個東西的資料，所以一定要寫）
+      var fr = b.frameAt ? frameRows(b, this.trajN) : (b.tr.FX ? resampleFrame(b.tr, this.trajN) : { fwd: new Float32Array(4 * this.trajN), up: new Float32Array(4 * this.trajN) });
       this.renderer.setFrameRow(b.row, fr.fwd, fr.up);
     }
   };
+  // 朝向由函式給的東西（破片的翻滾、彈丸的彈頭朝前）：frameAt(t) → { fwd, up, thr（引擎出力，可省） }
+  function frameRows(b, N) {
+    var t0 = b.tr.T[0], t1 = b.tr.T[b.tr.n - 1], fwd = new Float32Array(4 * N), up = new Float32Array(4 * N);
+    for (var i = 0; i < N; i++) {
+      var q = b.frameAt(t0 + (t1 - t0) * i / (N - 1));
+      fwd[4 * i] = q.fwd[0]; fwd[4 * i + 1] = q.fwd[1]; fwd[4 * i + 2] = q.fwd[2]; fwd[4 * i + 3] = q.thr || 0;
+      up[4 * i] = q.up[0]; up[4 * i + 1] = q.up[1]; up[4 * i + 2] = q.up[2];
+    }
+    return { fwd: fwd, up: up };
+  }
+  /* 光束（戰鬥模式的雷射）：tr 是第一顆光子的路，beam = { dur, tail }，tail 是最後一顆光子的路（晚 dur 出發）。
+   * 回傳軌跡貼圖第三列要放的東西：每個取樣時刻 T，E(T) = (最後一顆在 T 的位置 − 第一顆在 T 的位置) ÷ dur
+   * —— 晚 dl 出發的光子在 T 的位置就近似成「第一顆的位置 + dl × E」。平直空間裡 E = 發射的船的速度 − 光的速度，
+   * 所以光束的尾端一直接在（還在動的）發射口上，在船自己看來光束筆直朝機頭。
+   * 最後一顆還沒出發的時刻，用它出發時的速度往回延長（那一段光束實際上還沒射出來，著色器會擋掉）。
+   * w 分量 lam：最後一顆比第一顆晚多久到終點（÷ dur）。終點 ＝ 第一顆停下來的地方（打中東西、或飛完射程）那個垂直於光路的平面。 */
+  function beamFrame(tr, beam, N) {
+    var tail = beam.tail, dur = beam.dur, t0 = tr.T[0], t1 = tr.T[tr.n - 1], fwd = new Float32Array(4 * N), up = new Float32Array(4 * N), i;
+    function tailAt(T) {
+      var a = tail.T[0], b = tail.T[tail.n - 1], q, k;
+      if (T <= a) { k = (T - a) / tail.UT[0]; return [tail.X[0] + tail.UX[0] * k, tail.Y[0] + tail.UY[0] * k, tail.Z[0] + tail.UZ[0] * k]; }
+      q = P.sampleAt(tail, Math.min(T, b));
+      k = T > b ? (T - b) / q.ut : 0;
+      return [q.x + q.ux * k, q.y + q.uy * k, q.z + q.uz * k];
+    }
+    var e = P.sampleAt(tr, t1), nl = Math.hypot(e.ux, e.uy, e.uz) || 1, ne = [e.ux / nl, e.uy / nl, e.uz / nl];
+    function Fp(T) { var p = tailAt(T); return (p[0] - e.x) * ne[0] + (p[1] - e.y) * ne[1] + (p[2] - e.z) * ne[2]; }
+    var lo = t1 - 2 * dur - 1, hi = t1 + 3 * dur + 1, lam = 1;
+    if (Fp(lo) < 0 && Fp(hi) > 0) {
+      for (i = 0; i < 44; i++) { var mid = 0.5 * (lo + hi); if (Fp(mid) < 0) lo = mid; else hi = mid; }
+      lam = (lo - t1) / dur;
+    }
+    lam = Math.max(0.05, Math.min(3, lam));
+    for (i = 0; i < N; i++) {
+      var T = t0 + (t1 - t0) * i / (N - 1), h = P.sampleAt(tr, T), p = tailAt(T);
+      fwd[4 * i] = (p[0] - h.x) / dur; fwd[4 * i + 1] = (p[1] - h.y) / dur; fwd[4 * i + 2] = (p[2] - h.z) / dur; fwd[4 * i + 3] = lam;
+    }
+    return { fwd: fwd, up: up, lam: lam };
+  }
+  Bodies.beamFrame = beamFrame;
 
   // 有人開的船：機頭（FX FY FZ）＋出力（TH）、上方（GX GY GZ）＋閃光（FL），取樣方式跟 P.resample 一樣
   function resampleFrame(tr, N) {
@@ -141,7 +199,8 @@
     var b = {
       group: this.nextGroup++, pulse: 0, kind: 'ball', shape: o.shape || 'pilot', color: o.color || [1, 1, 1], radius: o.radius,
       mass: 0, e: 0, absorbed: true, live: true, tr: tr, row: this.freeRows.shift(), spec: null, seen: null, now: null, tag: o.tag || null,
-      slot: o.slot || 0, engMask: 255      // 飛船：用格子貼圖的第幾個船位、哪幾具引擎還在
+      slot: o.slot || 0, engMask: o.engMask != null ? o.engMask : this.shipEngMask,      // 飛船：用格子貼圖的第幾個船位、哪幾具引擎還在
+      pivot: o.pivot || null, kv: o.kv || 0, frameAt: o.frameAt || null
     };
     this.upload(b);
     this.list.push(b);
@@ -153,8 +212,9 @@
     if (!tr || tr.n < 2) return null;
     this.makeRoom();
     var b = {
-      group: this.nextGroup++, pulse: 0, kind: o.kind, shape: o.kind === 'light' ? 'dot' : 'ball', color: o.color, radius: o.radius,
-      mass: 0, e: 0, absorbed: true, fixed: true, linger: o.linger, tr: tr, row: this.freeRows.shift(), spec: null, seen: null, now: null, tag: o.tag || null
+      group: this.nextGroup++, pulse: 0, kind: o.kind, shape: o.shape || (o.beam ? 'beam' : (o.kind === 'light' ? 'dot' : 'ball')), color: o.color, radius: o.radius,
+      mass: 0, e: 0, absorbed: true, fixed: true, linger: o.linger, tr: tr, row: this.freeRows.shift(), spec: null, seen: null, now: null, tag: o.tag || null,
+      beam: o.beam || null, slot: o.slot || 0, engMask: o.engMask != null ? o.engMask : 0, pivot: o.pivot || null, kv: o.kv || 0, frameAt: o.frameAt || null
     };
     this.upload(b);
     this.list.push(b);
@@ -233,7 +293,7 @@
   // 還在繞的軌道快用完時往後接一段（丟掉太久以前的部分，讓貼圖的解析度留給現在）
   Bodies.prototype.extend = function (b, holes, tCam) {
     var tr = b.tr, n = tr.n, i0 = 0;
-    while (i0 < n - 2 && tr.T[i0 + 1] < tCam - (LOOKBACK + 60)) i0++;
+    while (i0 < n - 2 && tr.T[i0 + 1] < tCam - (this.lookback + 60)) i0++;
     var s = new Float64Array([tr.X[n - 1], tr.Y[n - 1], tr.Z[n - 1], tr.T[n - 1], tr.PX[n - 1], tr.PY[n - 1], tr.PZ[n - 1], tr.PT[n - 1]]);
     var more = P.trace(holes, s, { tSpan: 600, rMax: 90, frac: 0.012, maxSteps: 60000, tau0: tr.TAU[n - 1] });
     b.tr = join(tr, i0, n, more);
@@ -286,7 +346,10 @@
       if (!b.live && tCam > b.t1 + linger) { this.remove(i); continue; }
       var te = this.seenTime(b, holes, tCam, cam, camInside);
       b.seenT = te;
+      // 光束：最後一顆光子晚 dur 出發，所以整段都看完的時刻比第一顆晚；tailT ＝ 現在看到的光束尾端在第一顆光子那條路上的哪個時刻
+      b.tailT = b.shape === 'beam' ? this.seenTime(b, holes, tCam - b.beam.dur * Math.max(1, b.lam || 1), cam, camInside) : te;
       b.seen = te === null ? null : P.sampleAt(tr, te);
+      b.clear = !!b.seen && !camInside && holes[0].rs > 0 && segDist(cam, b.seen, holes[0].pos) > 4 * holes[0].rs;      // 從攝影機直直看過去，離黑洞夠遠（光幾乎沒彎）
       b.now = (tCam >= b.t0 && tCam <= b.t1) ? P.sampleAt(tr, tCam) : null;
     }
     return absorbed;
@@ -301,8 +364,12 @@
     for (var i = 0; i < this.list.length; i++) {
       var b = this.list[i], tr = b.tr;
       if (b.hidden) continue;                      // 外面說這一格不用畫（例如確定在鏡頭外的小東西）
-      var mid = (b.seenT == null) ? b.t0 : b.seenT;
-      var lo = Math.max(b.t0, tCam - LOOKBACK, mid - (wide ? 45 : 22)), hi = Math.min(b.t1, tCam, mid + (wide ? 18 : 10));
+      var mid = (b.seenT == null) ? b.t0 : b.seenT, beam = b.shape === 'beam';
+      var lo = Math.max(b.t0, tCam - this.lookback, mid - (wide ? 45 : 22)), hi = Math.min(b.t1, tCam, mid + (wide ? 18 : 10));
+      if (this.tight && !wide && b.clear && b.shape !== 'pilot' && b.shape !== 'ship') {
+        lo = Math.max(b.t0, tCam - this.lookback, (beam && b.tailT != null ? Math.min(mid, b.tailT) : mid) - 2);
+        hi = Math.min(b.t1, tCam, mid + 2);
+      }
       if (hi < lo) continue;
       var i0 = P.sampleAt(tr, lo).index, i1 = Math.min(tr.n - 1, P.sampleAt(tr, hi).index + 1);
       var stride = Math.max(1, Math.floor((i1 - i0) / 48));
@@ -315,13 +382,15 @@
         if (j === i1) break;
       }
       // 包圍球要包住整個東西：立方體的外接球是半邊長 × √3；飛船的是半船長 × shipBound（船身外框加上船尾的噴射，由 app 照模型設定）
-      var isShip = b.shape === 'ship' || b.shape === 'pilot';
-      var rad = 0.5 * Math.hypot(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]) + b.radius * (b.shape === 'cube' ? 1.75 : (isShip ? this.shipBound : 1)) + (stride > 1 ? 0.8 : 0.3);
+      var isShip = b.shape === 'ship' || b.shape === 'pilot', sd = this.shipDims;
+      var rad = 0.5 * Math.hypot(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]) + b.radius * (b.shape === 'cube' ? 1.75 : (isShip ? this.shipBound : 1)) + (stride > 1 ? 0.8 : 0.3) + (beam ? 1.2 * b.beam.dur : 0);
+      var kind = beam ? 5 : (b.shape === 'chunk' ? 6 : (b.kind === 'light' ? 1 : (b.shape === 'cube' ? 2 : (b.shape === 'ship' ? 3 : (b.shape === 'pilot' ? 4 : 0)))));
       out.push({
         A: [b.t0 - tCam, (this.trajN - 1) / (b.t1 - b.t0), b.row, b.radius],
-        D: [lo - tCam, hi - tCam, b.slot || 0, b.engMask == null ? 255 : b.engMask],
-        B: [b.color[0], b.color[1], b.color[2], b.kind === 'light' ? 1 : (b.shape === 'cube' ? 2 : (b.shape === 'ship' ? 3 : (b.shape === 'pilot' ? 4 : 0)))],
-        C: [0.5 * (mn[0] + mx[0]), 0.5 * (mn[1] + mx[1]), 0.5 * (mn[2] + mx[2]), rad]
+        D: [lo - tCam, (beam ? Math.min(tCam, hi + 2.2 * b.beam.dur) : hi) - tCam, beam ? b.beam.dur : (b.slot || 0), b.engMask == null ? this.shipEngMask : b.engMask],
+        B: [b.color[0], b.color[1], b.color[2], kind],
+        C: [0.5 * (mn[0] + mx[0]), 0.5 * (mn[1] + mx[1]), 0.5 * (mn[2] + mx[2]), rad],
+        E: b.shape === 'chunk' ? [b.pivot[0], b.pivot[1], b.pivot[2], b.kv] : (isShip ? [sd[0] / 2, sd[1] / 2, sd[2] / 2, 2 * b.radius / sd[0]] : [0, 0, 0, 1])
       });
     }
     return out;

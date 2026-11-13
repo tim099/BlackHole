@@ -112,7 +112,7 @@
     ctx.font = (10 * dpr) + 'px sans-serif';
 
     // 距離圈
-    var ring = this.range > 40 ? 20 : (this.range > 18 ? 10 : 5);
+    var ring = this.range > 110 ? 50 : (this.range > 40 ? 20 : (this.range > 18 ? 10 : 5));
     ctx.strokeStyle = 'rgba(255,255,255,0.07)';
     ctx.fillStyle = 'rgba(255,255,255,0.30)';
     for (var rr = ring; rr < this.range * 1.5; rr += ring) {
@@ -176,6 +176,7 @@
     // 拋進去的東西
     for (i = 0; i < st.bodies.length; i++) {
       b = st.bodies[i];
+      if (st.game && (b.tag === 'spark' || (b.tag && b.tag.cells))) continue;      // 戰鬥模式：碎屑與破片不上雷達（太亂）
       var tr = b.tr, col = 'rgb(' + Math.round(b.color[0] * 255) + ',' + Math.round(b.color[1] * 255) + ',' + Math.round(b.color[2] * 255) + ')';
       if (b.pulse === 0 && !(st.game && b.kind === 'light')) {      // 戰鬥模式：光彈太多，不畫整條路
         var stp = Math.max(1, Math.floor(tr.n / 600));

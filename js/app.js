@@ -42,7 +42,11 @@
 
   // 飛船模型（雕刻作品的格子，js/ship_data.js）：解碼一次、上傳成 3D 貼圖。壞了就不給飛船這個選項，其他照常
   var shipModel = null;
-  try { if (BH.Ship && BH.ShipData) { shipModel = BH.Ship.decode(BH.ShipData); renderer.setShip(shipModel); bodies.shipBound = shipModel.bound * 1.05; } }
+  try { if (BH.Ship && BH.ShipData) { shipModel = BH.Ship.decode(BH.ShipData); renderer.setShip(shipModel); bodies.shipBound = shipModel.bound * 1.05;
+      bodies.shipDims = shipModel.dims.slice(); bodies.shipEngMask = (1 << Math.min(8, shipModel.engines.length)) - 1;
+      // 戰鬥模式中彈的地方最裡面那一圈是「燒紅的」：那個色號原本的模型沒用到，在這裡登記成會發光
+      if (BH.World) { var hot = BH.World.HOT; shipModel.emit[hot >> 5] |= (1 << (hot & 31)) >>> 0; }
+    } }
   catch (e) { shipModel = null; console.error('飛船模型載入失敗：', e); }
   function shipMeters() { return shipModel ? shipModel.dims[0] * shipModel.data.metersPerVoxel : 0; }
 
@@ -57,7 +61,11 @@
   var game = null;
   if (BH.GameUI && BH.Game && BH.World && shipModel) {
     BH.World.setModel(shipModel);            // 劃出部位（反應爐、引擎、武器…），之後每艘船各拿一份格子
-    game = new BH.GameUI({ canvas: canvas, renderer: renderer, bodies: bodies, map: map, S: S, toast: function (m) { toast(m); },
+    // 彈藥的模型（雕刻作品 claude-afterglow-missile、claude-afterglow-slug）：壞了就畫回小球，其他照常
+    var weaponModels = null;
+    try { if (BH.MissileData && BH.SlugData) weaponModels = { missile: BH.Ship.decode(BH.MissileData), slug: BH.Ship.decode(BH.SlugData) }; }
+    catch (e) { weaponModels = null; console.error('彈藥模型載入失敗：', e); }
+    game = new BH.GameUI({ canvas: canvas, renderer: renderer, bodies: bodies, map: map, S: S, weaponModels: weaponModels, toast: function (m) { toast(m); },
       exit: function () { setMode('menu'); }, frameMs: function () { return fpsAvg; } });
   }
 
@@ -893,6 +901,64 @@
     bodies.update(H0, 0, cf.pos, false);
     var r4 = compare(shot(cf.P, cf.pos), mask(mine, shipModel.grid), mask(mine, vox.grid));
     rows.push(T.row('顯示卡・戰鬥：別的船位被挖了洞，用原本模型的船剪影不變（不同的像素數）', r4.da, 0, Math.max(4, 4e-3 * r4.a), 'abs', '反向對照：跟挖過的那一份比，不同 ' + r4.db + ' 個'));
+
+    // 4. 一塊破片：把船的前半截（x ≥ 120 的格子）當成一塊，放進另一個船位，照「一塊格子」的畫法畫（位置對到它自己的重心、只走包圍球裡那一段）
+    var half = new Uint8Array(M.grid.length), hn = 0, hs = [0, 0, 0], nz = M.dims[2], hr = 0;
+    for (i = 0; i < M.grid.length; i++) {
+      if (!M.grid[i] || i % nx < 120) continue;
+      half[i] = M.grid[i]; hn++; hs[0] += i % nx + 0.5; hs[1] += Math.floor(i / nx) % ny + 0.5; hs[2] += Math.floor(i / (nx * ny)) + 0.5;
+    }
+    var com = [hs[0] / hn, hs[1] / hn, hs[2] / hn], kvS = 2 * R / nx;
+    for (i = 0; i < half.length; i++) if (half[i]) hr = Math.max(hr, Math.hypot(i % nx + 0.5 - com[0], Math.floor(i / nx) % ny + 0.5 - com[1], Math.floor(i / (nx * ny)) + 0.5 - com[2]));
+    renderer.setShipSlot(2, half);
+    var off = [(com[0] - nx / 2) * kvS, (com[1] - ny / 2) * kvS, (com[2] - nz / 2) * kvS];
+    var pc = [pos[0] + mine.fwd[0] * off[0] + mine.side[0] * off[1] + mine.up[0] * off[2], pos[1] + mine.fwd[1] * off[0] + mine.side[1] * off[1] + mine.up[1] * off[2], pos[2] + mine.fwd[2] * off[0] + mine.side[2] * off[1] + mine.up[2] * off[2]];
+    bodies.clear();
+    bodies.addTraced(still(pc, fwd, up), { kind: 'ball', shape: 'chunk', slot: 2, pivot: com, kv: kvS, radius: (hr + 1) * kvS, color: [1, 1, 1], linger: 1e9 });
+    bodies.update(H0, 0, cf.pos, false);
+    var r5 = compare(shot(cf.P, cf.pos), mask(mine, half), mask(mine, M.grid));
+    rows.push(T.row('顯示卡・戰鬥：一塊破片（船的前半截 ' + hn + ' 格）的剪影跟 JS 算的不一樣的像素數 ÷ 剪影像素數', r5.da / Math.max(r5.a, 1), 0, 4e-3, 'abs',
+      '剪影：顯示卡 ' + r5.gpu + '、JS ' + r5.a + ' 像素，不同 ' + r5.da + ' 個。破片的位置是它自己的重心（模型座標 ' + com.map(function (x) { return x.toFixed(1); }).join(', ') + '），不是船心'));
+    rows.push(T.row('顯示卡・戰鬥・反向對照：跟整艘船的剪影不一樣的像素數（> 100 記 1）', r5.db > 100 ? 1 : 0, 1, 0, 'abs', '不同 ' + r5.db + ' 個像素 —— 少掉的後半截'));
+
+    // 5. 光束：平直空間、發射的船以 0.5 c 橫著飛，光束持續 2。攝影機此刻看到的那一段，兩端應該在哪裡？
+    //    晚 dl 出發的光子從 A + v dl 出發、朝 n 飛；它在時刻 t 的光要「現在」到攝影機 ⇒ t + 距離 = 0，解出 t 就知道看到它在哪。
+    (function () {
+      var A = [-1.5, 0.4, 0.3], n = G.norm([0.9, 0.1, -0.42]), vd = G.norm(G.cross(n, [0, 1, 0])), vE = 0.5, v = [vd[0] * vE, vd[1] * vE, vd[2] * vE], dur = 2, cam = cf.pos;
+      var t0 = -(Math.hypot(A[0] - cam[0], A[1] - cam[1], A[2] - cam[2]) + 3.2);
+      function at(dl, t, vv) { var k = t - t0 - dl; return [A[0] + vv[0] * dl + n[0] * k, A[1] + vv[1] * dl + n[1] * k, A[2] + vv[2] * dl + n[2] * k]; }
+      function seen(dl, vv) {
+        var lo = t0 + dl, hi = 0;
+        for (var j = 0; j < 60; j++) { var mid = 0.5 * (lo + hi), q = at(dl, mid, vv); if (mid + Math.hypot(q[0] - cam[0], q[1] - cam[1], q[2] - cam[2]) < 0) lo = mid; else hi = mid; }
+        return at(dl, lo, vv);
+      }
+      function ray(p, t) { var s = P.launch(H0, p, n, 1, 'light'); s[3] = t; return P.trace(H0, s, { tSpan: 12, rMax: 400, frac: 0.012, maxSteps: 4000 }); }
+      var e0 = seen(0, v), e1 = seen(dur, v), e1still = seen(dur, [0, 0, 0]);
+      var lookB = G.norm([0.5 * (e0[0] + e1[0]) - cam[0], 0.5 * (e0[1] + e1[1]) - cam[1], 0.5 * (e0[2] + e1[2]) - cam[2]]), fr = G.cameraFrame(H0, cam, [0, 0, 0], lookB, [0, 1, 0]);
+      function toPx2(p) { var pj = G.project(H0, fr, p); return [(pj[0] / pj[2] / tanF * size + size) / 2 - 0.5, (pj[1] / pj[2] / tanF * size + size) / 2 - 0.5]; }
+      bodies.clear();
+      bodies.addTraced(ray(A, t0), { kind: 'light', beam: { dur: dur, tail: ray([A[0] + v[0] * dur, A[1] + v[1] * dur, A[2] + v[2] * dur], t0 + dur) }, color: [1, 1, 1], radius: 0.03, linger: 1e9 });
+      bodies.update(H0, 0, cam, false);
+      var px2 = renderer.renderToPixels({
+        tanFov: tanF, camPos: fr.pos, P: fr.P, camInside: false, energyTest: false, holes: H0, far: 60, maxSteps: 300, stepScale: 1,
+        disk: { on: false, rin: 3, rout: 12, brightness: 1 }, diskTime: 0, flags: [0, 0, 0, 0], exposure: 0.2, beaconPeriod: 2, debug: false, plume: false, bodies: bodies.uniforms(0, false)      // 曝光壓低：光束的芯不要過曝，不然「亮的那一段」會被暈開的光撐大
+      }, size);
+      var p0 = toPx2(e0), p1 = toPx2(e1), ps = toPx2(e1still), L = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]), ax = [(p1[0] - p0[0]) / L, (p1[1] - p0[1]) / L];
+      var peak = 0, j, smin = Infinity, smax = -Infinity, perp = 0, cnt = 0;
+      function lum(q2) { return Math.pow((px2[q2 * 4] + px2[q2 * 4 + 1] + px2[q2 * 4 + 2]) / 765, 2.2); }      // 畫面上的值過了 gamma；換回線性的亮度再取「一半亮」
+      var raw = 0;
+      for (j = 0; j < size * size; j++) { peak = Math.max(peak, lum(j)); raw = Math.max(raw, px2[j * 4] + px2[j * 4 + 1] + px2[j * 4 + 2]); }
+      for (j = 0; j < size * size; j++) {
+        if (raw < 30 || lum(j) < 0.5 * peak) continue;
+        var qx = j % size - p0[0], qy = Math.floor(j / size) - p0[1], sA = qx * ax[0] + qy * ax[1];
+        smin = Math.min(smin, sA); smax = Math.max(smax, sA); perp += Math.abs(qx * ax[1] - qy * ax[0]); cnt++;
+      }
+      rows.push(T.row('顯示卡・戰鬥：光束兩端畫在哪裡，跟照光行時間算的差幾個像素（取大的那一端）', cnt ? Math.max(Math.abs(smin), Math.abs(smax - L)) : NaN, 0, 3, 'abs',
+        '算出來的兩端 (' + p0[0].toFixed(1) + ', ' + p0[1].toFixed(1) + ')、(' + p1[0].toFixed(1) + ', ' + p1[1].toFixed(1) + ')，長 ' + L.toFixed(1) + ' 像素；畫出來的亮的那一段沿這條線從 ' + smin.toFixed(1) + ' 到 ' + smax.toFixed(1) + '（' + cnt + ' 個像素比最亮的一半還亮，最亮 ' + raw + '／765）'));
+      rows.push(T.row('顯示卡・戰鬥：光束亮的像素離那條線平均幾個像素', cnt ? perp / cnt : NaN, 0, 1.5, 'abs'));
+      rows.push(T.row('顯示卡・戰鬥・反向對照：當成「發射的船沒在動」的話，尾端會差幾個像素（> 8 記 1）', Math.hypot(ps[0] - p1[0], ps[1] - p1[1]) > 8 ? 1 : 0, 1, 0, 'abs',
+        '那樣的尾端在 (' + ps[0].toFixed(1) + ', ' + ps[1].toFixed(1) + ')，差 ' + Math.hypot(ps[0] - p1[0], ps[1] - p1[1]).toFixed(1) + ' 像素'));
+    })();
     bodies.clear();
   }
 

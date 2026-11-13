@@ -14,7 +14,8 @@
  *   結束    玩家：反應爐或駕駛艙壞了、武器全壞、或掉到奇異點（穿過視界不算，還能繼續飛到最後）。
  *
  * 上面每一個數字（加速度、洞多大、門檻、敵機行為、波次）都是遊戲設定，不是物理。
- * 船是剛體：不會被潮汐力扯碎，被打掉的碎塊也不會飄走（少了的格子就是不見了）。
+ * 船是剛體：不會被潮汐力扯碎。被挖掉的格子就是不見了；但打完之後跟主體（反應爐那一群）斷開的格子群會變成破片飄走，
+ * 船毀的時候剩下的船身從最後中彈的地方斷成幾截。破片只是看得到，不擋子彈、不會再撞到誰。
  */
 (function (root) {
   'use strict';
@@ -30,17 +31,18 @@
     shipLen: 0.5,        // 船長（rs）
     accel: 0.03,         // 引擎全好時的固有加速度（c²/rs）；4.5 rs 以內光靠它已經懸停不住
     boost: 2.2, boostCost: 10, energyMax: 100, energyRegen: 7,
-    laser: { gap: 0.55, cost: 9, range: 22, radius: 3, depth: 50, tol: 0.012 },
+    laser: { gap: 0.55, cost: 9, range: 22, radius: 3, depth: 50, tol: 0.012, beam: 0.6 },      // beam：開一次火的光束持續多久（跟 gap 差不多 ⇒ 按住就是連續的一道）
     kinetic: { gap: 1.6, cost: 6, speed: 0.45, range: 55, solveRange: 40, base: 5, gain: 7, max: 14, tol: 0.02 },
     missile: { gap: 5, stock: 6, reload: 25, speed: 0.15, accel: 0.2, burn: 8, life: 55, blast: 14, cone: 0.9, fuse: 0.04, guard: 0.03, minRange: 2, maxRange: 32 },
     aimTol: 0.1,         // 射擊解：預測的最近距離小於這個才算有解（rs）
     enemyAccel: 0.022, enemyTurn: 0.55, enemyRange: 14, enemySpread: 0.012, enemyFC: 0.6,
     enemyGap: { laser: 4.5, kinetic: 7, missile: 16 },
     autoTurn: 1.4,       // 自動飛行轉機頭的速度（弧度 ÷ 固有時）
-    histKeep: 190,       // 每個東西留多久的歷史（座標時間）：要比戰場上最遠的光行時間長
-    wallR: 70, wallK: 0.004,
+    histKeep: 420,       // 每個東西留多久的歷史（座標時間）：要比戰場上最遠的光行時間長（戰場直徑 280，再加衝出去的那一段）
+    wallR: 140, wallK: 0.004,   // 外圍的空間扭曲從多遠開始、多硬（往回帶的固有加速度 = wallK × 超出去多遠）
     waves: [['L'], ['L', 'LK'], ['LK', 'LM'], ['L', 'LK', 'LM'], ['LK', 'LM', 'LKM']],     // 每一波每艘敵機帶什麼：L 雷射、K 動能、M 飛彈
     waveGap: 3, hullDead: 0.6,
+    frag: { min: 40, perHit: 4, speed: 0.012, spin: 0.25, life: 45 },      // 破片：至少幾格才算一塊、一次中彈最多幾塊、飄開的速度（c）、翻滾（弧度 ÷ 時間）、留多久
     playerTough: 0.3,    // 玩家的船比較耐打：每個部位「壞掉」的門檻乘上這個數（反應爐要剩不到 15% 才算壞，敵機是 50%）
     chase: 0.78          // 對手在黑洞另一側、或離得太遠時，換到「對手的軌道半徑 × 這個數」的軌道上：角速度不一樣，才繞得到同一側
   };
@@ -119,6 +121,52 @@
   function carveTunnel(v, pos, dir, r, depth, out) {
     for (var k = 0; k <= depth; k += 0.8) carveSphere(v, [pos[0] + dir[0] * k, pos[1] + dir[1] * k, pos[2] + dir[2] * k], r, out);
   }
+  /* 中彈的地方留下痕跡：把離球心 R + a 到 R + b 格之間、還在的格子塗成 val。
+   * 先塗一圈燒黑的（CHAR），再把最貼近洞口的那一圈塗成燒紅的（HOT，會發光）。有改的 (格子編號, 色號) 成對接在 paint 後面。 */
+  var HOT = 236, CHAR = 73;
+  function scorch(v, c, R, a, b, val, paint) {
+    var m = v.m, nx = m.dims[0], ny = m.dims[1], nz = m.dims[2], g = v.grid, Ro = R + b, lo2 = (R + a) * (R + a), hi2 = Ro * Ro;
+    var x0 = Math.max(0, Math.floor(c[0] - Ro)), x1 = Math.min(nx - 1, Math.ceil(c[0] + Ro));
+    var y0 = Math.max(0, Math.floor(c[1] - Ro)), y1 = Math.min(ny - 1, Math.ceil(c[1] + Ro));
+    var z0 = Math.max(0, Math.floor(c[2] - Ro)), z1 = Math.min(nz - 1, Math.ceil(c[2] + Ro));
+    for (var z = z0; z <= z1; z++) for (var y = y0; y <= y1; y++) for (var x = x0; x <= x1; x++) {
+      var dx = x + 0.5 - c[0], dy = y + 0.5 - c[1], dz = z + 0.5 - c[2], d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > hi2 || d2 <= lo2) continue;
+      var idx = x + nx * (y + ny * z);
+      if (!g[idx] || g[idx] === val) continue;
+      g[idx] = val; paint.push(idx, val);
+    }
+  }
+  /* 找出跟主體斷開的格子群（六個面相連才算連著）。主體 ＝ 含 seed 那一格的那一群；seed 是 null（或那一格已經空了）⇒ 最大的那一群。
+   * 回傳 [Int32Array（一群的格子編號）, …]，不含主體，大的在前；不改格子。 */
+  var _lab = null, _ord = null;
+  Vox.prototype.loose = function (seed) {
+    var m = this.m, nx = m.dims[0], ny = m.dims[1], nz = m.dims[2], sxy = nx * ny, n = sxy * nz, g = this.grid;
+    if (!_lab || _lab.length !== n) { _lab = new Uint8Array(n); _ord = new Int32Array(n); }
+    var lab = _lab, ord = _ord, head = 0, tail = 0, ranges = [], i, main = -1;
+    lab.fill(0);
+    function flood(start) {
+      var a = tail;
+      ord[tail++] = start; lab[start] = 1;
+      while (head < tail) {
+        var c = ord[head++], x = c % nx, y = ((c / nx) | 0) % ny, z = (c / sxy) | 0, q;
+        if (x > 0) { q = c - 1; if (g[q] && !lab[q]) { lab[q] = 1; ord[tail++] = q; } }
+        if (x < nx - 1) { q = c + 1; if (g[q] && !lab[q]) { lab[q] = 1; ord[tail++] = q; } }
+        if (y > 0) { q = c - nx; if (g[q] && !lab[q]) { lab[q] = 1; ord[tail++] = q; } }
+        if (y < ny - 1) { q = c + nx; if (g[q] && !lab[q]) { lab[q] = 1; ord[tail++] = q; } }
+        if (z > 0) { q = c - sxy; if (g[q] && !lab[q]) { lab[q] = 1; ord[tail++] = q; } }
+        if (z < nz - 1) { q = c + sxy; if (g[q] && !lab[q]) { lab[q] = 1; ord[tail++] = q; } }
+      }
+      ranges.push([a, tail]);
+    }
+    if (seed != null && g[seed]) { flood(seed); main = 0; }
+    for (i = 0; i < n; i++) if (g[i] && !lab[i]) flood(i);
+    if (main < 0) for (i = 0; i < ranges.length; i++) if (main < 0 || ranges[i][1] - ranges[i][0] > ranges[main][1] - ranges[main][0]) main = i;
+    var out = [];
+    for (i = 0; i < ranges.length; i++) if (i !== main) out.push(ord.slice(ranges[i][0], ranges[i][1]));
+    out.sort(function (p, q2) { return q2.length - p.length; });
+    return out;
+  };
   function turnToward(sh, want, maxAng) {
     var ang = Math.acos(clamp(dot3(sh.fwd, want), -1, 1));
     if (ang > 1e-4) {
@@ -154,7 +202,7 @@
     this.wall = this.cfg.wallR > 0 ? { R: this.cfg.wallR, k: this.cfg.wallK } : null;
     this.rand = G.rng(o.seed || 20261113);
     this.t = 0; this.tau = 0;
-    this.ships = []; this.shots = []; this.missiles = []; this.events = [];
+    this.ships = []; this.shots = []; this.missiles = []; this.frags = []; this.events = [];
     this.wave = 0; this.score = 0; this.kills = 0;
     this.stats = { laser: { shots: 0, hits: 0 }, kinetic: { shots: 0, hits: 0 }, missile: { shots: 0, hits: 0 }, enemy: { shots: 0, hits: 0 } };      // 前三個是玩家各種武器的，最後一個是敵機全部加起來
     this.state = 'play'; this.reason = ''; this.crossed = false;
@@ -196,9 +244,10 @@
     var side = cross(sh.up, sh.fwd), kv = this.kv;
     return [dot3(d, sh.fwd) / kv, dot3(d, side) / kv, dot3(d, sh.up) / kv];
   };
-  World.prototype.fromModel = function (sh, q) {
+  World.prototype.fromModel = function (sh, q, s) {      // s：船心在哪（沒給 ＝ 現在）
     var m = this.model.dims, side = cross(sh.up, sh.fwd), kv = this.kv, a = (q[0] - m[0] / 2) * kv, b = (q[1] - m[1] / 2) * kv, c = (q[2] - m[2] / 2) * kv;
-    return [sh.s[0] + sh.fwd[0] * a + side[0] * b + sh.up[0] * c, sh.s[1] + sh.fwd[1] * a + side[1] * b + sh.up[1] * c, sh.s[2] + sh.fwd[2] * a + side[2] * b + sh.up[2] * c];
+    s = s || sh.s;
+    return [s[0] + sh.fwd[0] * a + side[0] * b + sh.up[0] * c, s[1] + sh.fwd[1] * a + side[1] * b + sh.up[1] * c, s[2] + sh.fwd[2] * a + side[2] * b + sh.up[2] * c];
   };
 
   // 這艘船這一種武器還能用的部位
@@ -303,13 +352,26 @@
     } else {
       var tr = P.trace(holes, st, { tSpan: w.range, rMax: 400, frac: 0.012, maxSteps: kind === 'laser' ? 8000 : 30000 });
       if (tr.n < 2) return null;
-      out = { id: this.nextId++, kind: kind, team: sh.team, owner: sh, tr: tr, dead: false, tHit: null };
+      out = { id: this.nextId++, kind: kind, team: sh.team, owner: sh, tr: tr, dead: false, tHit: null, beam: null };
+      if (kind === 'laser' && w.beam > 0) out.beam = this.beamTail(sh, part, st, w);
       this.shots.push(out);
       this.events.push({ type: 'shot', shot: out });
     }
     sh.cool[kind] = isP ? w.gap : cfg.enemyGap[kind] * (0.8 + 0.4 * this.rand());
     if (isP) { if (w.cost) this.energy -= w.cost; this.stats[kind].shots++; } else this.stats.enemy.shots++;
     return out;
+  };
+
+  /* 雷射不是一顆光子，是持續 beam 這麼久的一段光束。打不打得中照第一顆光子（上面那條 tr）算；
+   * 這裡另外算「最後一顆」：船照現在的軌道滑到 beam 之後的位置，機頭不動，從那時的發射口射出去。
+   * 畫面上的光束就是這兩顆光子之間連起來的那一段（中間的光子各自從當時的發射口出發，所以光束的尾端一直接在發射口上）。 */
+  World.prototype.beamTail = function (sh, part, st, w) {
+    var holes = this.holes, sT = Float64Array.from(sh.s);
+    G.advanceTo(holes, sT, sh.s[3] + w.beam, null, 0, this.wall);
+    var st2 = G.launch(holes, sT, sh.fwd, 1, this.fromModel(sh, part.muzzle, sT));
+    if (!st2 || !(st2[3] > st[3])) return null;
+    var tail = P.trace(holes, st2, { tSpan: w.range + 2, rMax: 400, frac: 0.012, maxSteps: 8000 });
+    return tail.n >= 2 ? { dur: st2[3] - st[3], tail: tail } : null;
   };
 
   /* 這一格的時間裡，一個東西從 A0 走到 A1、船從 p0 走到 p1：有沒有碰到船身的格子。
@@ -326,14 +388,119 @@
 
   // 打中：照武器種類把格子拿掉，再看哪些部位因此壞了
   World.prototype.strike = function (sh, kind, hit, size, t, by) {
-    var cfg = this.cfg, out = [];
-    if (kind === 'laser') carveTunnel(sh.vox, hit.pos, hit.dir, cfg.laser.radius, cfg.laser.depth, out);
-    else if (kind === 'kinetic') carveSphere(sh.vox, [hit.pos[0] + hit.dir[0] * 0.5 * size, hit.pos[1] + hit.dir[1] * 0.5 * size, hit.pos[2] + hit.dir[2] * 0.5 * size], size, out);
-    else carveSphere(sh.vox, hit.pos, cfg.missile.blast, out);
-    sh.flash = 1;
+    var cfg = this.cfg, out = [], paint = [], balls = [], i, k;
+    if (kind === 'laser') for (k = 0; k <= cfg.laser.depth; k += 0.8) balls.push([hit.pos[0] + hit.dir[0] * k, hit.pos[1] + hit.dir[1] * k, hit.pos[2] + hit.dir[2] * k, cfg.laser.radius]);
+    else if (kind === 'kinetic') balls.push([hit.pos[0] + hit.dir[0] * 0.5 * size, hit.pos[1] + hit.dir[1] * 0.5 * size, hit.pos[2] + hit.dir[2] * 0.5 * size, size]);
+    else balls.push([hit.pos[0], hit.pos[1], hit.pos[2], cfg.missile.blast]);
+    for (i = 0; i < balls.length; i++) carveSphere(sh.vox, balls[i], balls[i][3], out);
+    for (i = 0; i < balls.length; i++) scorch(sh.vox, balls[i], balls[i][3], 0.9, 2.4, CHAR, paint);
+    for (i = 0; i < balls.length; i++) scorch(sh.vox, balls[i], balls[i][3], 0, 0.9, HOT, paint);
+    var carved = out.length;
+    sh.flash = 1; sh.lastHit = hit.pos.slice();
+    var loose = this.shed(sh, t, hit.pos, out);                 // 斷開的格子群：從船上拿掉（接在 out 後面），夠大的變成破片
     if (by && by.team === 'player') this.stats[kind].hits++; else if (by && by.team === 'enemy') this.stats.enemy.hits++;
-    this.events.push({ type: 'hit', ship: sh, kind: kind, t: t, cells: Int32Array.from(out), by: by ? by.team : null, src: by || null, size: size });
+    this.events.push({ type: 'hit', ship: sh, kind: kind, t: t, cells: Int32Array.from(out), paint: Int32Array.from(paint), carved: carved, loose: loose,
+      pos: hit.pos.slice(), dir: hit.dir.slice(), by: by ? by.team : null, src: by || null, size: size });
     this.assess(sh, t, by);
+  };
+
+  // 反應爐裡還在的一格（離反應爐中心最近的）：含這一格的那一群格子就是「主體」。反應爐整個沒了 ⇒ null（改取最大的那一群）
+  World.prototype.seedOf = function (sh) {
+    var b = this.model.parts[0].box, nx = this.model.dims[0], ny = this.model.dims[1], g = sh.vox.grid;
+    var cx = (b[0] + b[1]) / 2, cy = (b[2] + b[3]) / 2, cz = (b[4] + b[5]) / 2, best = null, bd = Infinity;
+    for (var z = b[4]; z <= b[5]; z++) for (var y = b[2]; y <= b[3]; y++) for (var x = b[0]; x <= b[1]; x++) {
+      var idx = x + nx * (y + ny * z);
+      if (!g[idx]) continue;
+      var d = Math.abs(x - cx) + Math.abs(y - cy) + Math.abs(z - cz);
+      if (d < bd) { bd = d; best = idx; }
+    }
+    return best;
+  };
+  /* 打完之後，跟主體斷開的格子群不再是船的一部分：從船上拿掉（編號接在 out 後面；上面的部位跟著少），
+   * 夠大的（frag.min 格以上，一次最多 frag.perHit 塊）變成破片自己飄走。回傳斷開了幾群。 */
+  World.prototype.shed = function (sh, t, origin, out) {
+    var v = sh.vox, comps = v.loose(this.seedOf(sh)), cfg = this.cfg.frag, made = 0, i, j;
+    for (i = 0; i < comps.length; i++) {
+      var cells = comps[i], vals = new Uint8Array(cells.length);
+      for (j = 0; j < cells.length; j++) {
+        var idx = cells[j], pid = v.m.partOf[idx];
+        vals[j] = v.grid[idx]; v.grid[idx] = 0;
+        if (pid) v.left[pid - 1]--;
+        out.push(idx);
+      }
+      v.count -= cells.length;
+      if (cells.length >= cfg.min && made < cfg.perHit && this.addFrag(sh, cells, vals, t, origin, false)) made++;
+    }
+    return comps.length;
+  };
+  /* 一塊破片：cells 是它在模型裡佔的格子、vals 是那些格子的色號。從斷開那一刻船的位置與速度出發，
+   * 朝「離中彈點遠的方向」（加一點亂數）慢慢飄開，之後就是一條測地線；一邊繞固定的軸翻滾。小塊飛得快、轉得快。
+   * wreck ＝ 船毀了之後斷開的那幾大塊。破片只是看得到，不擋子彈。 */
+  World.prototype.addFrag = function (sh, cells, vals, t, origin, wreck) {
+    var cfg = this.cfg.frag, d = this.model.dims, nx = d[0], ny = d[1], sxy = nx * ny, n = cells.length, r = this.rand, i, x, y, z;
+    var sx = 0, sy = 0, sz = 0, box = [1e9, -1, 1e9, -1, 1e9, -1], rad2 = 0;
+    for (i = 0; i < n; i++) {
+      x = cells[i] % nx; y = ((cells[i] / nx) | 0) % ny; z = (cells[i] / sxy) | 0;
+      sx += x; sy += y; sz += z;
+      if (x < box[0]) box[0] = x; if (x > box[1]) box[1] = x; if (y < box[2]) box[2] = y; if (y > box[3]) box[3] = y; if (z < box[4]) box[4] = z; if (z > box[5]) box[5] = z;
+    }
+    var com = [sx / n + 0.5, sy / n + 0.5, sz / n + 0.5];
+    for (i = 0; i < n; i++) {
+      x = cells[i] % nx + 0.5 - com[0]; y = ((cells[i] / nx) | 0) % ny + 0.5 - com[1]; z = ((cells[i] / sxy) | 0) + 0.5 - com[2];
+      rad2 = Math.max(rad2, x * x + y * y + z * z);
+    }
+    var jit = [r() - 0.5, r() - 0.5, r() - 0.5], dm = sub(com, origin);
+    dm = len(dm) > 1e-6 ? norm(dm) : norm(jit);
+    dm = norm([dm[0] + 0.5 * jit[0], dm[1] + 0.5 * jit[1], dm[2] + 0.5 * jit[2]]);
+    var side = cross(sh.up, sh.fwd), dw = norm([sh.fwd[0] * dm[0] + side[0] * dm[1] + sh.up[0] * dm[2], sh.fwd[1] * dm[0] + side[1] * dm[1] + sh.up[1] * dm[2], sh.fwd[2] * dm[0] + side[2] * dm[1] + sh.up[2] * dm[2]]);
+    var k = Math.cbrt(800 / n), st = G.launch(this.holes, sh.s, dw, cfg.speed * (0.6 + 0.8 * r()) * clamp(k, 0.8, 2.5), this.fromModel(sh, com));
+    if (!st) return null;
+    var tr = P.trace(this.holes, st, { tSpan: cfg.life, rMax: 400, frac: 0.012, maxSteps: 6000 });
+    if (tr.n < 2) return null;
+    var f = {
+      id: this.nextId++, team: sh.team, from: sh, wreck: !!wreck, t0: tr.T[0], tEnd: tr.T[tr.n - 1], n: n, cells: cells, vals: vals, com: com, rad: Math.sqrt(rad2) + 0.9, box: box,
+      tr: tr, fwd: sh.fwd.slice(), up: sh.up.slice(), axis: norm([r() - 0.5, r() - 0.5, r() - 0.5]), rate: cfg.spin * (0.4 + 1.2 * r()) * clamp(k, 0.25, 2.5)
+    };
+    this.frags.push(f);
+    this.events.push({ type: 'frag', frag: f, ship: sh, t: t });
+    return f;
+  };
+  // 破片在時刻 t 的朝向：從斷開那一刻船的朝向開始，繞固定的軸等速轉
+  World.fragFrame = function (f, t) {
+    var a = f.rate * Math.max(0, t - f.t0);
+    return { fwd: G.rotate(f.fwd, f.axis, a), up: G.rotate(f.up, f.axis, a) };
+  };
+  /* 船毀了：剩下的船身從最後中彈的地方斷開 —— 一刀斷成前後兩截，比較大的那一截再縱向裂成兩塊 —— 每一塊各自飄走。
+   * 斷口太靠邊的話往中間挪（不然只是掉一個角）。之後這艘船自己的格子清空。 */
+  World.prototype.breakUp = function (sh, t) {
+    var v = sh.vox, d = this.model.dims, nx = d[0], ny = d[1], sxy = nx * ny, g = v.grid, n = g.length, r = this.rand, i, x, y, z, k;
+    var hp = sh.lastHit || [d[0] / 2, d[1] / 2, d[2] / 2];
+    hp = [clamp(hp[0], 0.25 * d[0], 0.75 * d[0]), clamp(hp[1], 0.3 * d[1], 0.7 * d[1]), clamp(hp[2], 0, d[2])];
+    var n1 = norm([1, 0.6 * (r() - 0.5), 0.5 * (r() - 0.5)]), n2 = norm([0.3 * (r() - 0.5), 1, 0.6 * (r() - 0.5)]);
+    var side = new Uint8Array(n), cnt = [0, 0, 0, 0], sum = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    for (i = 0; i < n; i++) {
+      if (!g[i]) continue;
+      x = i % nx + 0.5; y = ((i / nx) | 0) % ny + 0.5; z = ((i / sxy) | 0) + 0.5;
+      k = ((x - hp[0]) * n1[0] + (y - hp[1]) * n1[1] + (z - hp[2]) * n1[2]) >= 0 ? 1 : 2;
+      side[i] = k; cnt[k]++; sum[k][0] += x; sum[k][1] += y; sum[k][2] += z;
+    }
+    var big = cnt[1] >= cnt[2] ? 1 : 2, cen = cnt[big] ? [sum[big][0] / cnt[big], sum[big][1] / cnt[big], sum[big][2] / cnt[big]] : hp;
+    for (i = 0; i < n; i++) {
+      if (side[i] !== big) continue;
+      x = i % nx + 0.5; y = ((i / nx) | 0) % ny + 0.5; z = ((i / sxy) | 0) + 0.5;
+      if ((x - cen[0]) * n2[0] + (y - cen[1]) * n2[1] + (z - cen[2]) * n2[2] < 0) { side[i] = 3; cnt[big]--; cnt[3]++; }
+    }
+    var made = [];
+    for (k = 1; k <= 3; k++) {
+      if (cnt[k] < this.cfg.frag.min) continue;
+      var cells = new Int32Array(cnt[k]), vals = new Uint8Array(cnt[k]), j = 0;
+      for (i = 0; i < n; i++) if (side[i] === k) { cells[j] = i; vals[j++] = g[i]; }
+      var f = this.addFrag(sh, cells, vals, t, hp, true);
+      if (f) made.push(f);
+    }
+    g.fill(0); v.count = 0;
+    for (i = 0; i < v.left.length; i++) v.left[i] = 0;
+    return made;
   };
   World.prototype.assess = function (sh, t, by) {
     var parts = this.model.parts, v = sh.vox, i, p, eng = 0, engAll = 0, core = false, arms = 0;
@@ -634,7 +801,8 @@
       }
     }
 
-    // 7. 歷史
+    // 7. 歷史；走完的破片收掉
+    for (i = this.frags.length - 1; i >= 0; i--) if (this.t > this.frags[i].tEnd) this.frags.splice(i, 1);
     for (i = this.ships.length - 1; i >= 0; i--) {
       sh = this.ships[i];
       if (sh.alive) { G.histPush(holes, sh.hist, sh); G.histTrim(sh.hist, this.t - cfg.histKeep); }
@@ -647,6 +815,7 @@
     if (!sh.alive) return;
     sh.alive = false; sh.tDeath = this.t; sh.thr = 0;
     G.histPush(this.holes, sh.hist, sh);
+    if (why !== 'singularity') this.breakUp(sh, this.t);
     if (sh.team === 'enemy') {
       if (why !== 'singularity' && by && by.team === 'player') { this.kills++; this.score += 100 * Math.max(1, this.wave); }
       this.events.push({ type: 'kill', ship: sh, why: why });
@@ -657,7 +826,7 @@
   };
   World.prototype.takeEvents = function () { var e = this.events; this.events = []; return e; };
 
-  World.CFG = CFG; World.WEAPONS = WEAPONS; World.setModel = setModel; World.Vox = Vox; World.carveSphere = carveSphere; World.carveTunnel = carveTunnel;
+  World.CFG = CFG; World.WEAPONS = WEAPONS; World.setModel = setModel; World.Vox = Vox; World.carveSphere = carveSphere; World.carveTunnel = carveTunnel; World.scorch = scorch; World.HOT = HOT; World.CHAR = CHAR;
   World.model = function () { return MODEL; };
   BH.World = World;
   if (node) module.exports = World;

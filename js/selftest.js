@@ -339,13 +339,13 @@
       out.push(row('戰鬥・推進：在黑洞旁邊朝各種方向推 30 的固有時之後的 H（有質量粒子 = −1/2）', P.hamiltonian(H1, st), -0.5, 1e-7, 'abs', '此時 r = ' + Math.hypot(st[0], st[1], st[2]).toFixed(3) + ' rs'));
 
       // 邊界的空間扭曲：平直空間、以 0.6 c 直直往外衝進去。往回帶的固有加速度是 k·x ⇒ dγ/dx = −k x ⇒ 掉頭的地方 x = √(2(γ₀ − 1)/k)
-      var wl = { R: 70, k: 0.004 }, rTurn = 0, rNoWall;
-      st = P.launch(H0, [70, 0, 0], [1, 0, 0], 0.6, 'ball');
+      var wl = { R: W.CFG.wallR, k: W.CFG.wallK }, rTurn = 0, rNoWall;      // 用遊戲實際的設定
+      st = P.launch(H0, [wl.R, 0, 0], [1, 0, 0], 0.6, 'ball');
       for (i = 0; i < 4000; i++) { G.advanceTau(H0, st, 0.02, null, 0, wl); if (st[0] > rTurn) rTurn = st[0]; else break; }
-      st2 = P.launch(H0, [70, 0, 0], [1, 0, 0], 0.6, 'ball');
+      st2 = P.launch(H0, [wl.R, 0, 0], [1, 0, 0], 0.6, 'ball');
       G.advanceTau(H0, st2, i * 0.02, null, 0, null); rNoWall = st2[0];
-      out.push(row('戰鬥・邊界：以 0.6 c 往外衝進空間扭曲，最遠到哪才掉頭（rs）', rTurn, 70 + Math.sqrt(2 * (1.25 - 1) / 0.004), 1e-4, 'rel',
-        '解析值 R + √(2(γ₀ − 1)/k)。反向對照：同樣的時間沒有這一圈扭曲，已經飛到 ' + rNoWall.toFixed(1) + ' rs'));
+      out.push(row('戰鬥・邊界：以 0.6 c 往外衝進空間扭曲，最遠到哪才掉頭（rs）', rTurn, wl.R + Math.sqrt(2 * (1.25 - 1) / wl.k), 1e-4, 'rel',
+        '扭曲從 ' + wl.R + ' rs 開始；解析值 R + √(2(γ₀ − 1)/k)。反向對照：同樣的時間沒有這一圈扭曲，已經飛到 ' + rNoWall.toFixed(1) + ' rs'));
       out.push(row('戰鬥・邊界・反向對照：沒有扭曲的話飛得比掉頭點遠（1 = 是）', rNoWall > rTurn + 1 ? 1 : 0, 1, 0, 'abs'));
 
       // 發射：光子 H = 0；動能彈 H = −1/2，而且「船看到它」的速度就是設定的出膛速度
@@ -524,6 +524,61 @@
       out.push(row('戰鬥・整場：三種武器都自己開過火（1 = 是）', sk.laser.shots > 0 && sk.kinetic.shots > 0 && sk.missile.shots > 0 ? 1 : 0, 1, 0, 'abs',
         '雷射 ' + sk.laser.hits + '／' + sk.laser.shots + '、動能 ' + sk.kinetic.hits + '／' + sk.kinetic.shots + '、飛彈 ' + sk.missile.hits + '／' + sk.missile.shots + '（命中／發射）'));
       out.push(row('戰鬥・整場：同一個種子跑兩次，結束時的座標時間差', k1.t - k2.t, 0, 0, 'abs', '兩次都是 t = ' + k1.t.toFixed(6)));
+
+      // ── 體素破壞：斷開的格子群變成破片、船毀了斷成幾截；雷射是一段光束 ──
+      (function () {
+        function cutShip(yEnd) {      // 在 x = 70 那一排，從右舷往左舷一顆一顆打（坑的半徑 14 格），打到 y = yEnd 為止
+          var w = new W(H0, { empty: true, cfg: { wallR: 0 } });
+          var sh = w.addShip('enemy', P.launch(H0, [0, 0, 0], [1, 0, 0], 0.3, 'ball'), [1, 0, 0], [0, 1, 0], { loadout: 'LKM', cool: 1e9 });
+          sh.tough = 0;                // 這裡只看格子：不要讓它打到一半被判定擊毀
+          var res = { w: w, sh: sh, n0: sh.vox.count, gone: 0, carved: 0, fr: [], big: 0, inFrags: 0 };
+          for (var y = 4; y <= yEnd; y += 11) w.strike(sh, 'kinetic', { pos: [70, y, 20], dir: [0, 0, -1] }, 14, w.t, null);
+          var ev = w.takeEvents();
+          for (var j = 0; j < ev.length; j++) {
+            if (ev[j].type === 'hit') { res.gone += ev[j].cells.length; res.carved += ev[j].carved; }
+            if (ev[j].type === 'frag') { res.fr.push(ev[j].frag); res.big = Math.max(res.big, ev[j].frag.n); res.inFrags += ev[j].frag.n; }
+          }
+          return res;
+        }
+        var full = cutShip(114), part2 = cutShip(48), sizes = full.fr.map(function (f) { return f.n; }).join('、');
+        out.push(row('戰鬥・破壞：格子數守恆 —— 原本的 − 剩下的 − 事件裡說拿掉的', full.n0 - full.sh.vox.count - full.gone, 0, 0, 'abs',
+          '原本 ' + full.n0 + ' 格；被挖掉 ' + full.carved + '、因為斷開而掉下來 ' + (full.gone - full.carved) + '（其中 ' + full.inFrags + ' 格變成 ' + full.fr.length + ' 塊破片：' + sizes + '），剩 ' + full.sh.vox.count));
+        out.push(row('戰鬥・破壞：打完之後剩下的船身是完整的一塊（還有幾群跟主體斷開）', full.sh.vox.loose(full.w.seedOf(full.sh)).length, 0, 0, 'abs'));
+        out.push(row('戰鬥・破壞：整排打穿 ⇒ 船身斷成兩截（最大的那塊破片 ÷ 整艘船 > 0.2 記 1）', full.big / full.n0 > 0.2 ? 1 : 0, 1, 0, 'abs',
+          '最大的一塊 ' + full.big + ' 格（' + (100 * full.big / full.n0).toFixed(1) + '%）。反向對照見下一項'));
+        out.push(row('戰鬥・破壞・反向對照：只打穿一半 ⇒ 沒有斷成兩截（最大的破片 ÷ 整艘船 < 0.2 記 1）', part2.big / part2.n0 < 0.2 ? 1 : 0, 1, 0, 'abs',
+          '最大的一塊 ' + part2.big + ' 格（' + (100 * part2.big / part2.n0).toFixed(1) + '%），破片 ' + part2.fr.length + ' 塊'));
+        // 破片從哪裡出發、飄多快：位置 ＝ 它的重心在船上的位置；相對船的速度在設定的範圍裡
+        var f0 = full.fr[0], sh0 = full.sh, p0 = full.w.fromModel(sh0, f0.com), us = G.velocity4(H0, sh0.s);
+        var gam = -P.dot(P.metricCov(H0, sh0.s), [f0.tr.UX[0], f0.tr.UY[0], f0.tr.UZ[0], f0.tr.UT[0]], us), vrel = Math.sqrt(Math.max(0, 1 - 1 / (gam * gam))), cf2 = W.CFG.frag;
+        out.push(row('戰鬥・破壞：破片的出發點離「它的重心在船上的位置」多遠（rs）', Math.hypot(f0.tr.X[0] - p0[0], f0.tr.Y[0] - p0[1], f0.tr.Z[0] - p0[2]), 0, 1e-9, 'abs'));
+        out.push(row('戰鬥・破壞：破片相對船的速度在設定的範圍裡（1 = 是）', vrel >= 0.6 * 0.8 * cf2.speed - 1e-9 && vrel <= 1.4 * 2.5 * cf2.speed + 1e-9 ? 1 : 0, 1, 0, 'abs',
+          '量到 ' + vrel.toFixed(5) + ' c；範圍 ' + (0.48 * cf2.speed).toFixed(4) + '～' + (3.5 * cf2.speed).toFixed(4) + '（船自己是 0.3 c）'));
+        // 船毀了：剩下的每一格都分到某一截裡
+        var wk = new W(H0, { empty: true, cfg: { wallR: 0 } }), sk2 = wk.addShip('enemy', P.launch(H0, [0, 0, 0], [1, 0, 0], 0.3, 'ball'), [1, 0, 0], [0, 1, 0], { cool: 1e9 });
+        var before = sk2.vox.count;
+        sk2.lastHit = [150, 40, 20];
+        wk.kill(sk2, 'core', null);
+        var wr = wk.takeEvents().filter(function (e3) { return e3.type === 'frag'; }).map(function (e3) { return e3.frag; }), wsum = wr.reduce(function (m2, f) { return m2 + f.n; }, 0);
+        out.push(row('戰鬥・破壞：船毀了之後斷成幾截，各截的格子數加起來 − 原本的', wsum - before, 0, 0, 'abs',
+          wr.length + ' 截：' + wr.map(function (f) { return f.n; }).join('、') + ' 格；船自己剩 ' + sk2.vox.count + ' 格'));
+        out.push(row('戰鬥・破壞：斷成至少兩截（1 = 是）', wr.length >= 2 ? 1 : 0, 1, 0, 'abs'));
+
+        // 光束：平直空間、船以 0.5 c 斜著飛。晚 dl 出發的光子 ＝ 第一顆的位置 + dl × E，E 應該是 船的速度 − 光的速度
+        var Bd = node ? require('./bodies.js') : root.BH.Bodies;
+        var wb = new W(H0, { empty: true, cfg: { wallR: 0 } });
+        var sb = wb.addShip('player', P.launch(H0, [0, 0, 0], G.norm([0.6, 0, 0.8]), 0.5, 'ball'), [1, 0, 0], [0, 1, 0], { loadout: 'L', cool: 0 });
+        wb.player = sb;
+        var shot = wb.fire(sb, 'laser');
+        if (!shot || !shot.beam || !Bd) { out.push(row('戰鬥・光束：射得出來（1 = 是）', 0, 1, 0, 'abs')); return; }
+        var bf = Bd.beamFrame(shot.tr, shot.beam, 64), ub = G.velocity4(H0, sb.s), vs = [ub[0] / ub[3], ub[1] / ub[3], ub[2] / ub[3]];
+        var hq = P.sampleAt(shot.tr, shot.tr.T[0] + 3), nn = [hq.ux / hq.ut, hq.uy / hq.ut, hq.uz / hq.ut], kq = 20;
+        var eErr = Math.hypot(bf.fwd[4 * kq] - (vs[0] - nn[0]), bf.fwd[4 * kq + 1] - (vs[1] - nn[1]), bf.fwd[4 * kq + 2] - (vs[2] - nn[2]));
+        out.push(row('戰鬥・光束：E 跟「船的速度 − 光的速度」差多少', eErr, 0, 1e-6, 'abs',
+          '船速 (' + vs.map(function (x2) { return x2.toFixed(3); }).join(', ') + ')、光 (' + nn.map(function (x2) { return x2.toFixed(3); }).join(', ') + ')；光束持續 ' + shot.beam.dur.toFixed(3) + '。所以光束的尾端一直接在還在動的發射口上'));
+        out.push(row('戰鬥・光束：最後一顆光子比第一顆晚多久到終點（÷ 持續時間）', bf.lam, 1 - (vs[0] * nn[0] + vs[1] * nn[1] + vs[2] * nn[2]), 1e-6, 'abs', '解析值 1 − 船速·光的方向（船追著自己的光跑，光束在路上被壓短）'));
+        out.push(row('戰鬥・光束・反向對照：船不動的話 E 就只是「往後」，跟上面差多少（> 0.3 記 1）', Math.hypot(vs[0], vs[1], vs[2]) > 0.3 ? 1 : 0, 1, 0, 'abs', '差的就是船速 ' + Math.hypot(vs[0], vs[1], vs[2]).toFixed(3) + ' c'));
+      })();
     })();
 
     // ── 背景的星空（js/stars.js、js/stars_data.js）：真的星表 ──

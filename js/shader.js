@@ -61,9 +61,10 @@ const vec3 GAL_C = vec3(0.963518, -0.267644, 0.);        // 銀河中心的方�
 #if MAX_BODIES > 0
 uniform int uBodyCount;
 uniform vec4 uBodyA[MAX_BODIES];   // 軌跡起點時間 − 攝影機時間, 每單位時間幾格, 第幾列, 半徑
-uniform vec4 uBodyB[MAX_BODIES];   // 顏色 rgb, 種類（0 球，1 光子標記，2 立方體，3 飛船，4 有人開的飛船）
+uniform vec4 uBodyB[MAX_BODIES];   // 顏色 rgb, 種類（0 球，1 光子標記，2 立方體，3 飛船，4 有人開的飛船，5 光束，6 一塊格子：破片、飛彈、彈丸）
 uniform vec4 uBodyC[MAX_BODIES];   // 包圍球：中心 xyz, 半徑
-uniform vec4 uBodyD[MAX_BODIES];   // 可能被看到的時段（相對攝影機時間）：最早, 最晚；飛船另外用：第幾個船位, 哪幾具引擎還在（每具一個 bit）
+uniform vec4 uBodyD[MAX_BODIES];   // 可能被看到的時段（相對攝影機時間）：最早, 最晚；飛船另外用：第幾個船位（光束：持續多久）, 哪幾具引擎還在（每具一個 bit）
+uniform vec4 uBodyE[MAX_BODIES];   // 用格子畫的東西：物體的位置對到模型座標的哪一點（xyz，格）, 一格多長（w）
 uniform sampler2D uTraj;           // 每個物體四列：(x, y, z, τ)、(dx/dλ, dt/dλ)，橫軸是座標時間；
                                    // 種類 4 多用兩列：(機頭 xyz, 引擎出力)、(上方 xyz, 被打中的閃光)
 #define SLOT_Z 6
@@ -451,8 +452,8 @@ void main(){
         vec4 D = uBodyD[b];
         if (t < D.x || t1 > D.y) continue;                 // 這個物體只可能在某一段時間被看到，這一小段不在裡面
         vec4 C = uBodyC[b];
-        vec3 dc = xm - C.xyz; float reach = C.w + halfLen;
-        if (dot(dc, dc) > reach * reach) continue;
+        vec3 dc = C.xyz - x, pc = dc - seg * clamp(dot(dc, seg) / seg2, 0., 1.);      // 包圍球的球心離這一小段光線多遠
+        if (dot(pc, pc) > C.w * C.w) continue;
         vec4 A = uBodyA[b];
         int row = int(A.z + .5) * 4;
         float q0 = clamp((t - A.x) * A.y, 0., float(TRAJ_N - 1));
@@ -462,12 +463,46 @@ void main(){
         vec3 vb = ub.xyz * iut;                            // 物體的座標速度 dx/dt
         vec3 d0 = x - (pb.xyz + vb * (t - tq));
         vec3 w = seg - vb * dtS;
+        float R = A.w;
+        vec4 Bc = uBodyB[b];                               // rgb 顏色；a：種類（見 uBodyB）
+        bool cube = Bc.a > 1.5 && Bc.a < 2.5, chunk = Bc.a > 5.5, beam = Bc.a > 4.5 && !chunk;
+        bool ship = (Bc.a > 2.5 && Bc.a < 4.5) || chunk, piloted = (Bc.a > 3.5 && Bc.a < 4.5) || chunk;
+        if (beam) {
+          /* 光束：不是一個點，是「第一顆光子」到「最後一顆光子」之間的一段。晚 dl 出發的那顆光子，此刻在 第一顆的位置 + dl × E
+           * （E 在軌跡貼圖的第三列，由 js/bodies.js 的 beamFrame 算好；發射的船在動，所以 E 不是單純的「往後」）。
+           * 這一小段光線上的點相對第一顆光子是 d0 + w s，所以要找的是兩條線段最近的地方：s ∈ [0, 1]、dl ∈ [0, 持續多久]。
+           * 找到之後再看那顆光子那時候存不存在：還沒出發、或已經到底（打中東西、飛完射程）的就不亮。
+           * 最近的地方落在這一小段的外面 ⇒ 留給隔壁那一小段算（不然交界上會加兩次）。光束不擋光，只把光加上去。 */
+          vec4 er = trajAt(row + 2, q0);
+          float dur = max(D.z, 1e-4), lam = max(er.w, .05);
+          vec3 eb = er.xyz * dur;
+          float ba = max(dot(w, w), 1e-12), be = max(dot(eb, eb), 1e-12), bb = dot(w, eb), bc = dot(w, d0), bf = dot(eb, d0);
+          float den = ba * be - bb * bb;
+          float s1 = den > 1e-6 * ba * be ? clamp((bb * bf - bc * be) / den, 0., 1.) : 0.;
+          float u = clamp((bb * s1 + bf) / be, 0., 1.);
+          float T1 = A.x + float(TRAJ_N - 1) / A.y;
+          float ts = t + dtS * clamp(-(bc - bb * u) / ba, 0., 1.);
+          float uLo = max(0., (ts - T1) / (lam * dur)), uHi = min(1., (ts - A.x) / dur);
+          if (uHi < uLo) continue;
+          u = clamp(u, uLo, uHi);
+          float sb = -(bc - bb * u) / ba;
+          if (sb < 0. || sb >= 1.) continue;
+          ts = t + dtS * sb;
+          if (ts - u * dur < A.x - .03 || ts - lam * u * dur > T1 + .03) continue;
+          vec3 qb = d0 + w * sb - eb * u;
+          float d2b = dot(qb, qb);
+          float Rc = max(R, .9 * pix * length(x + seg * sb - uCamPos));      // 遠的時候至少畫一個像素寬，亮度照比例降
+          if (d2b < 14. * Rc * Rc) {
+            float core = exp(-d2b / (Rc * Rc)), halo = exp(-d2b / (5. * Rc * Rc));
+            glowCol += (Bc.rgb * (1.5 * core + .30 * halo) + vec3(1.3) * core * core) * pow(R / Rc, .7);
+            glowS = min(glowS, sb);
+          }
+          continue;
+        }
         float s = clamp(-dot(d0, w) / max(dot(w, w), 1e-12), 0., 1.);
         vec3 qd = d0 + w * s;
-        float d2 = dot(qd, qd), R = A.w;
-        vec4 Bc = uBodyB[b];                               // rgb 顏色；a：0 球、1 光子標記、2 立方體、3 飛船
-        bool cube = Bc.a > 1.5 && Bc.a < 2.5, ship = Bc.a > 2.5, piloted = Bc.a > 3.5;
-        if (d2 >= (cube ? 3. : (ship ? uShipBound * uShipBound : 1.)) * R * R) continue;   // 立方體、飛船（含噴射）先用外接球粗篩
+        float d2 = dot(qd, qd);
+        if (d2 >= (cube ? 3. : (ship && !chunk ? uShipBound * uShipBound : 1.)) * R * R) continue;   // 立方體、飛船（含噴射）先用外接球粗篩；一塊格子的半徑本來就是包住它的球
         if (uGhost < .5 && sweep + dSweep * s > 3.1616) continue;   // 繞過半圈以上才到的 ＝ 重影
         float sHit = s, face = 1., edge = 0.;
         uint shipIdx = 0u; vec3 shipN = vec3(0.), shipPos = vec3(0.);
@@ -490,13 +525,21 @@ void main(){
             }
             shipThr = clamp(fr.w, 0., 1.5); shipFlash = clamp(ur.w, 0., 1.);
           }
-          float kv = 2. * R / uShipDim.x;
-          vec3 o = vec3(dot(d0, fw), dot(d0, sd), dot(d0, upv)) / kv + .5 * uShipDim;
+          vec4 Em = uBodyE[b];
+          float kv = Em.w;
+          vec3 o = vec3(dot(d0, fw), dot(d0, sd), dot(d0, upv)) / kv + Em.xyz;
           vec3 dv = vec3(dot(w, fw), dot(w, sd), dot(w, upv)) / kv;
           vec3 dvs = vec3(abs(dv.x) < 1e-9 ? 1e-9 : dv.x, abs(dv.y) < 1e-9 ? 1e-9 : dv.y, abs(dv.z) < 1e-9 ? 1e-9 : dv.z);
           vec3 tA = -o / dvs, tB = (uShipDim - o) / dvs;
           vec3 tmn = min(tA, tB), tmx = max(tA, tB);
           float sN = max(max(tmn.x, tmn.y), tmn.z), sF = min(min(min(tmx.x, tmx.y), tmx.z), 1.);
+          if (chunk) {
+            // 一塊格子只佔船位裡的一小角：只走包住它的那顆球裡面的那一段，不必把整個船位走完
+            vec3 oc = o - Em.xyz; float Rv = R / kv;
+            float qa = max(dot(dv, dv), 1e-12), qh2 = dot(oc, dv), disc = qh2 * qh2 - qa * (dot(oc, oc) - Rv * Rv);
+            if (disc <= 0.) { sN = 2.; sF = -1.; }
+            else { float sq = sqrt(disc); sN = max(sN, (-qh2 - sq) / qa); sF = min(sF, (-qh2 + sq) / qa); }
+          }
           int ax = 0; float sv = 2.;
           int slot = int(D.z + .5);
           ivec3 dim0 = ivec3(uShipDim + .5);

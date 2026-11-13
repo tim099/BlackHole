@@ -3,6 +3,10 @@
     senate cmd sculpture --arg op=export --arg work=claude-afterglow --arg format=list --arg links=none --arg out=<清單.txt>
     python -I tools/ship_pack.py <清單.txt> js/ship_data.js --name 餘暉號 --work claude-afterglow --mpv 0.1
 
+同一支也封戰鬥模式的彈藥模型（--var 指定放進 BH 的哪個名字）：
+    python -I tools/ship_pack.py <清單.txt> js/missile_data.js --name 飛彈 --work claude-afterglow-missile --mpv 0.1 --var MissileData
+    python -I tools/ship_pack.py <清單.txt> js/slug_data.js --name 動能彈 --work claude-afterglow-slug --mpv 0.1 --var SlugData
+
 清單每行 x,y,z,color（雕刻座標：x 機頭方向、y 寬、z 上；color 是 RGB332 調色盤 index，0 ＝ 空）。
 做的事：
   1. 裁到有格子的外框；
@@ -77,6 +81,7 @@ def main():
     ap.add_argument("--name", required=True)
     ap.add_argument("--work", required=True)
     ap.add_argument("--mpv", type=float, required=True, help="每格幾公尺")
+    ap.add_argument("--var", default="ShipData", help="放進 BH 的哪個名字（飛船 ShipData；飛彈 MissileData、動能彈 SlugData）")
     a = ap.parse_args()
 
     raw = open(a.src, "rb").read()
@@ -143,7 +148,7 @@ def main():
         fo.write(" * engines ＝ 從格子找到的引擎（噴嘴口 x、中心 y z、半徑 r，裁過的座標、單位格；噴射往 −x）。 */\n")
         fo.write("(function (root) {\n  'use strict';\n  var D = " + json.dumps(meta, ensure_ascii=False) + ";\n")
         fo.write("  D.rle = '" + b64 + "';\n")
-        fo.write("  root.BH = root.BH || {};\n  root.BH.ShipData = D;\n")
+        fo.write("  root.BH = root.BH || {};\n  root.BH.%s = D;\n" % a.var)
         fo.write("  if (typeof module !== 'undefined' && module.exports) module.exports = D;\n")
         fo.write("})(typeof window !== 'undefined' ? window : globalThis);\n")
     print(json.dumps(dict(meta, rleBytes=len(out), jsBytes=len(b64)), ensure_ascii=False))

@@ -23,6 +23,9 @@
   var FOV = 72;
   var DISK_OUT = 6.5;        // 戰鬥模式的吸積盤小一點：船在盤外面飛，盤是地標（也是掩護），不是一片霧
   var SELF_WINDOW = 3;       // 玩家自己那艘船交給著色器多長的一段路（座標時間）
+  var FIRST_SLOT = 2;        // 格子貼圖的船位：0 原廠的模型、1 武器的模型（飛彈、彈丸），其餘給戰鬥中的船與破片
+  var MODEL_SLOT = 1, SLUG_SCALE = 1.5;      // 彈藥的模型放在第 1 個船位；動能彈本尊只有 2 公尺長，畫大一點才看得到
+  var FRAG_MAX = 10, SPARK_MAX = 8;      // 畫面上最多同時幾塊用格子畫的破片、幾顆碎屑（再多著色器會慢）
   var WEAPONS = ['laser', 'kinetic', 'missile'];
   var WNAME = { laser: '雷射', kinetic: '動能砲', missile: '飛彈' };
   var TEAM_COLOR = { player: [1, 1, 1], enemy: [1.0, 0.50, 0.42] };
@@ -65,10 +68,15 @@
     this.mviews = {};        // 飛彈 id → 畫面上的物體
     this.shotBody = {};      // 光彈／彈丸 id → 畫面上的物體
     this.fireballs = [];
-    this.slotFree = [];
-    for (i = 1; i < Renderer.SHIP_SLOTS; i++) this.slotFree.push(i);
+    this.fviews = [];        // 破片：{ frag, body, slot }
+    this.slotFree = []; this.slotDirty = {};      // slotDirty：那個船位裡留著東西的範圍（true ＝ 整個船位），下一塊破片用之前要先清
+    for (i = FIRST_SLOT; i < app.renderer.shipSlots; i++) { this.slotFree.push(i); this.slotDirty[i] = true; }
+    this.loadWeaponModels();
     this.self = this.addShipView(this.world.player, true);
     if (this.mapRange0 == null) this.mapRange0 = app.map.range;
+    if (this.lookback0 == null) this.lookback0 = app.bodies.lookback;
+    app.bodies.lookback = Math.max(app.bodies.lookback, this.world.cfg.histKeep);      // 戰場另一頭的東西，光要走很久才到
+    app.bodies.tight = true;
     this.active = true; this.paused = false; this.keys = {}; this.flash = 0; this.plan = null;
     this.mouseFire = false; this.ended = false; this.aimHold = 0;
     $('gover').className = '';
@@ -79,6 +87,9 @@
     if (document.exitPointerLock && this.locked) document.exitPointerLock();
     this.app.bodies.clear();
     if (this.mapRange0 != null) { this.app.map.range = this.mapRange0; this.mapRange0 = null; }
+    if (this.lookback0 != null) { this.app.bodies.lookback = this.lookback0; this.lookback0 = null; }
+    this.app.bodies.tight = false;
+    this.app.renderer.resetEngines();
     $('gover').className = '';
     this.ctx.clearRect(0, 0, this.hud.width, this.hud.height);
   };
@@ -162,24 +173,86 @@
   };
   // 一艘船出場：給它一個船位、把一整份格子傳上去
   GameUI.prototype.addShipView = function (sh, isSelf) {
-    var app = this.app, w = this.world, slot = this.slotFree.length ? this.slotFree.shift() : 0;
+    var app = this.app, w = this.world, slot = Math.max(0, this.takeSlot());
     var v = { ship: sh, slot: slot, vis: null, queue: [], body: null };
-    if (slot) { v.vis = w.model.grid.slice(); app.renderer.setShipSlot(slot, v.vis); }
+    if (slot) { v.vis = w.model.grid.slice(); app.renderer.setShipSlot(slot, v.vis); this.slotDirty[slot] = true; }
     v.body = app.bodies.addLive(isSelf ? this.selfTrail() : sh.hist, { radius: 0.5 * w.cfg.shipLen, color: TEAM_COLOR[sh.team], tag: sh, slot: slot });
     v.body.engMask = sh.engMask;
     this.views[sh.id] = v;
     return v;
   };
-  // 把一批被打掉的格子從「畫面上那一份」拿掉，只重傳包住它們的那一小塊
-  GameUI.prototype.applyCells = function (v, cells) {
-    if (!v.vis || !cells.length) return;
+  /* 彈藥的模型（飛彈、動能彈）放進第 MODEL_SLOT 個船位：飛彈在前段、動能彈在後段，離得夠遠，各自的包圍球罩不到對方。
+   * 所有飛彈共用同一份格子（它們不會各自被打出洞），差別只在各自的路與朝向。飛彈的引擎接在船的引擎清單後面。
+   * 之後 this.wm[種類] ＝ { pivot（模型中心在船位裡的位置）, kv（一格多長）, radius（包住模型與噴射的球）, engMask } ；沒有模型 ⇒ this.wm = null（畫回小球）。 */
+  GameUI.prototype.loadWeaponModels = function () {
+    var app = this.app, R = app.renderer, w = this.world, d = w.model.dims, src = app.weaponModels, wm = {};
+    this.wm = null;
+    R.resetEngines();
+    if (!src || R.shipSlots <= MODEL_SLOT) return;
+    R.setShipSlot(MODEL_SLOT, this.zeros || (this.zeros = new Uint8Array(d[0] * d[1] * d[2])));
+    function place(key, m, cx, scale) {
+      var md = m.dims, x0 = Math.round(cx - md[0] / 2), y0 = Math.round((d[1] - md[1]) / 2), z0 = Math.round((d[2] - md[2]) / 2), e = m.engines[0], eng = -1;
+      if (x0 < 0 || x0 + md[0] > d[0] || y0 < 0 || z0 < 0 || md[1] > d[1] || md[2] > d[2]) return false;
+      R.patchShipSlot(MODEL_SLOT, x0, y0, z0, md[0], md[1], md[2], m.grid);
+      if (e) eng = R.addEngine({ x: e.x + x0, y: e.y + y0, z: e.z + z0, r: e.r });
+      var plume = eng >= 0 ? R.shipPlume[0] * e.r : 0;
+      wm[key] = { pivot: [x0 + md[0] / 2, y0 + md[1] / 2, z0 + md[2] / 2], kv: w.kv * scale, radius: (Math.hypot(md[0] / 2 + plume, md[1] / 2, md[2] / 2) + 1) * w.kv * scale, engMask: eng >= 0 ? (1 << eng) : 0, len: md[0] * w.kv * scale };
+      return true;
+    }
+    if (place('missile', src.missile, 0.27 * d[0], 1) && place('slug', src.slug, 0.75 * d[0], SLUG_SCALE)) this.wm = wm;
+  };
+  // 要一個空的船位。沒有空的 ⇒ 把最舊的那塊破片收掉、用它的；連破片都沒有 ⇒ −1
+  GameUI.prototype.takeSlot = function () {
+    if (this.slotFree.length) return this.slotFree.shift();
+    if (!this.fviews || !this.fviews.length) return -1;
+    var old = this.fviews.shift();
+    this.app.bodies.removeBody(old.body);
+    return old.slot;
+  };
+  /* 一塊破片出場：只把它那幾格放進一個船位（先把那個船位上一次留下的東西清掉），
+   * 照它自己的路飄（world 算好的測地線）、照它自己的軸翻滾。它的光一樣要走過來才看得到。 */
+  GameUI.prototype.addFragView = function (f) {
+    var app = this.app, w = this.world, d = w.model.dims, nx = d[0], ny = d[1], sxy = nx * ny, i;
+    while (this.fviews.length >= FRAG_MAX) { var old = this.fviews.shift(); app.bodies.removeBody(old.body); this.slotFree.push(old.slot); }
+    var slot = this.takeSlot();
+    if (slot < 0) return;
+    var b = f.box, bw = b[1] - b[0] + 1, bh = b[3] - b[2] + 1, bd = b[5] - b[4] + 1, buf = new Uint8Array(bw * bh * bd);
+    for (i = 0; i < f.n; i++) { var c = f.cells[i]; buf[(c % nx - b[0]) + bw * ((((c / nx) | 0) % ny - b[2]) + bh * (((c / sxy) | 0) - b[4]))] = f.vals[i]; }
+    var q = this.slotDirty[slot];
+    if (q === true) app.renderer.setShipSlot(slot, this.zeros || (this.zeros = new Uint8Array(nx * ny * d[2])));
+    else if (q) app.renderer.patchShipSlot(slot, q[0], q[2], q[4], q[1] - q[0] + 1, q[3] - q[2] + 1, q[5] - q[4] + 1, new Uint8Array((q[1] - q[0] + 1) * (q[3] - q[2] + 1) * (q[5] - q[4] + 1)));
+    app.renderer.patchShipSlot(slot, b[0], b[2], b[4], bw, bh, bd, buf);
+    this.slotDirty[slot] = b;
+    var body = app.bodies.addTraced(f.tr, { kind: 'ball', shape: 'chunk', slot: slot, pivot: f.com, kv: w.kv, radius: f.rad * w.kv, color: TEAM_COLOR[f.team], linger: 40, tag: f,
+      frameAt: function (t) { return World.fragFrame(f, t); } });
+    if (!body) { this.slotFree.push(slot); return; }
+    this.fviews.push({ frag: f, body: body, slot: slot });
+  };
+  // 中彈的地方噴出幾顆燒紅的碎屑（小方塊，各自照測地線飛）：只是看得到，數量有上限
+  GameUI.prototype.sparks = function (e) {
+    var w = this.world, sh = e.ship, bodies = this.app.bodies, n = e.kind === 'laser' ? 1 : (e.kind === 'kinetic' ? 2 : 3), alive = 0, i;
+    if (!e.carved) return;
+    for (i = 0; i < bodies.list.length; i++) if (bodies.list[i].tag === 'spark') alive++;
+    var side = G.cross(sh.up, sh.fwd);
+    for (i = 0; i < n && alive < SPARK_MAX; i++, alive++) {
+      var dm = G.norm([-e.dir[0] + 1.6 * (Math.random() - 0.5), -e.dir[1] + 1.6 * (Math.random() - 0.5), -e.dir[2] + 1.6 * (Math.random() - 0.5)]);
+      var dw = [sh.fwd[0] * dm[0] + side[0] * dm[1] + sh.up[0] * dm[2], sh.fwd[1] * dm[0] + side[1] * dm[1] + sh.up[1] * dm[2], sh.fwd[2] * dm[0] + side[2] * dm[1] + sh.up[2] * dm[2]];
+      var st = G.launch(this.holes, sh.s, dw, 0.03 + 0.06 * Math.random(), w.fromModel(sh, e.pos));
+      if (!st) continue;
+      var tr = P.trace(this.holes, st, { tSpan: 4 + 4 * Math.random(), rMax: 400, frac: 0.012, maxSteps: 800 });
+      if (tr.n >= 2) bodies.addTraced(tr, { kind: 'ball', shape: 'cube', color: [2.8, 1.25, 0.35], radius: 0.003 + 0.004 * Math.random(), linger: 20, tag: 'spark' });
+    }
+  };
+  // 把一批被打掉的格子從「畫面上那一份」拿掉、把燒痕塗上去，只重傳包住它們的那一小塊。paint ＝ 成對的 (格子編號, 色號)
+  GameUI.prototype.applyCells = function (v, cells, paint) {
+    if (!v.vis || (!cells.length && !(paint && paint.length))) return;
     var d = this.world.model.dims, nx = d[0], ny = d[1], x0 = 1e9, x1 = -1, y0 = 1e9, y1 = -1, z0 = 1e9, z1 = -1, i, x, y, z;
-    for (i = 0; i < cells.length; i++) {
-      var idx = cells[i];
-      v.vis[idx] = 0;
+    function grow(idx) {
       x = idx % nx; y = Math.floor(idx / nx) % ny; z = Math.floor(idx / (nx * ny));
       if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; if (z < z0) z0 = z; if (z > z1) z1 = z;
     }
+    if (paint) for (i = 0; i < paint.length; i += 2) { v.vis[paint[i]] = paint[i + 1]; grow(paint[i]); }
+    for (i = 0; i < cells.length; i++) { v.vis[cells[i]] = 0; grow(cells[i]); }
     var w = x1 - x0 + 1, h = y1 - y0 + 1, dz = z1 - z0 + 1, buf = new Uint8Array(w * h * dz), k = 0;
     for (z = z0; z <= z1; z++) for (y = y0; y <= y1; y++) { var o = x0 + nx * (y + ny * z); buf.set(v.vis.subarray(o, o + w), k); k += w; }
     this.app.renderer.patchShipSlot(v.slot, x0, y0, z0, w, h, dz, buf);
@@ -192,10 +265,14 @@
       else if (e.type === 'shot') {
         var sh = e.shot;
         this.shotBody[sh.id] = sh.kind === 'laser'
-          ? bodies.addTraced(sh.tr, { kind: 'light', color: SHOT_COLOR.laser[sh.team], radius: 0.036, linger: 60, tag: sh })
-          : bodies.addTraced(sh.tr, { kind: 'ball', color: SHOT_COLOR.kinetic[sh.team], radius: 0.028, linger: 60, tag: sh });
+          ? bodies.addTraced(sh.tr, { kind: 'light', beam: sh.beam, color: SHOT_COLOR.laser[sh.team], radius: sh.beam ? 0.011 : 0.036, linger: 60, tag: sh })
+          : (this.wm
+            ? bodies.addTraced(sh.tr, { kind: 'ball', shape: 'chunk', slot: MODEL_SLOT, pivot: this.wm.slug.pivot, kv: this.wm.slug.kv, radius: this.wm.slug.radius, color: TEAM_COLOR[sh.team], linger: 60, tag: sh })      // 沒給朝向 ⇒ 彈頭朝飛行方向
+            : bodies.addTraced(sh.tr, { kind: 'ball', color: SHOT_COLOR.kinetic[sh.team], radius: 0.028, linger: 60, tag: sh }));
       } else if (e.type === 'missile') {
-        this.mviews[e.missile.id] = bodies.addLive(e.missile.hist, { shape: 'ball', radius: 0.042, color: SHOT_COLOR.missile[e.missile.team], tag: e.missile });
+        this.mviews[e.missile.id] = this.wm
+          ? bodies.addLive(e.missile.hist, { shape: 'chunk', slot: MODEL_SLOT, pivot: this.wm.missile.pivot, kv: this.wm.missile.kv, radius: this.wm.missile.radius, engMask: this.wm.missile.engMask, color: TEAM_COLOR[e.missile.team], tag: e.missile })
+          : bodies.addLive(e.missile.hist, { shape: 'ball', radius: 0.042, color: SHOT_COLOR.missile[e.missile.team], tag: e.missile });
       } else if (e.type === 'missileEnd') {
         b = this.mviews[e.missile.id];
         if (b && bodies.list.indexOf(b) >= 0) { b.tr = e.missile.hist; bodies.upload(b); b.live = false; b.fixed = true; b.linger = 90; }
@@ -204,8 +281,13 @@
       } else if (e.type === 'hit') {
         v = this.views[e.ship.id];
         if (e.src && this.shotBody[e.src.id]) { b = this.shotBody[e.src.id]; if (bodies.list.indexOf(b) >= 0) bodies.truncate(b, e.t); }
-        if (v) { if (e.ship === pl) this.applyCells(v, e.cells); else v.queue.push({ t: e.t, cells: e.cells }); }
+        if (v) { if (e.ship === pl) this.applyCells(v, e.cells, e.paint); else v.queue.push({ t: e.t, cells: e.cells, paint: e.paint }); }
         if (e.ship === pl) this.flash = 1;
+        this.sparks(e);
+      } else if (e.type === 'frag') {
+        // 玩家自己的船毀了之後時間就停了，那幾截的光永遠到不了，不用放
+        if (!(e.frag.wreck && e.ship === pl)) this.addFragView(e.frag);
+        if (e.ship === pl && !e.frag.wreck && e.frag.n >= 1500) app.toast('⚠ 船身被打斷了一塊（' + e.frag.n + ' 格）');
       } else if (e.type === 'part') {
         v = this.views[e.ship.id];
         if (e.ship === pl) { if (v) v.body.engMask = pl.engMask; app.toast('⚠ ' + e.part.name + '壞了'); }
@@ -248,12 +330,13 @@
    *   已經看完的東西（光彈飛完、船爆完）收掉，船位還回去 */
   GameUI.prototype.afterUpdate = function () {
     var app = this.app, bodies = app.bodies, w = this.world, i, b, v, id;
+    for (i = this.fviews.length - 1; i >= 0; i--) if (bodies.list.indexOf(this.fviews[i].body) < 0) { this.slotFree.push(this.fviews[i].slot); this.fviews.splice(i, 1); }      // 看完（或被擠掉）的破片：船位還回去
     for (id in this.views) {
       v = this.views[id];
       var gone = bodies.list.indexOf(v.body) < 0, tSeen = v === this.self ? w.t : (gone || v.body.seenT == null ? -Infinity : v.body.seenT);
       while (v.queue.length && v.queue[0].t <= tSeen) {
         var q = v.queue.shift();
-        if (q.cells) this.applyCells(v, q.cells);
+        if (q.cells) this.applyCells(v, q.cells, q.paint);
         if (q.part) { v.body.engMask = q.mask; app.toast('敵機的' + q.part.name + '壞了'); }
       }
       if (v !== this.self && !v.ship.alive) {
@@ -273,7 +356,8 @@
     }
     for (i = bodies.list.length - 1; i >= 0; i--) {
       b = bodies.list[i];
-      if (b.fixed && b.tag !== 'fireball' && b.shape !== 'pilot' && b.seenT != null && b.seenT >= b.t1 - 1e-3) bodies.remove(i);
+      var doneT = b.shape === 'beam' ? b.tailT : b.seenT;      // 光束要等最後一顆光子也看完
+      if (b.fixed && b.tag !== 'fireball' && b.shape !== 'pilot' && doneT != null && doneT >= b.t1 - 1e-3) bodies.remove(i);
     }
     this.cull();
   };
@@ -290,6 +374,9 @@
       if (free || b.shape === 'pilot' || b.tag === 'fireball') continue;
       if (!b.seen) { b.hidden = true; continue; }
       if (Math.hypot(b.seen.x - c[0], b.seen.y - c[1], b.seen.z - c[2]) < 5 * rs) continue;
+      // 離鏡頭很近的大東西（一大截破片、身邊的光束）：中心在視野外，邊還是可能在裡面
+      var dCam = Math.hypot(b.seen.x - cf.pos[0], b.seen.y - cf.pos[1], b.seen.z - cf.pos[2]);
+      if (dCam < 5 * b.radius || (b.shape === 'beam' && dCam < 4)) continue;
       var pj = G.project(holes, cf, [b.seen.x, b.seen.y, b.seen.z]);
       if (pj && (pj[2] <= 0 || Math.atan2(Math.hypot(pj[0], pj[1]), pj[2]) > lim)) b.hidden = true;
     }
@@ -327,7 +414,7 @@
       width: w, height: h, tanFov: Math.tan(FOV * DEG / 2), camPos: cf.pos, P: cf.P, camInside: cf.nearHorizon, energyTest: true,
       holes: holes, far: Math.max(60, cf.r * 1.08 + 6), maxSteps: S.maxSteps, stepScale: 1,
       disk: { on: true, rin: 3, rout: DISK_OUT, brightness: S.disk.brightness, thick: S.disk.thick },
-      diskTime: dt, flags: [1, 0, 1, 1], exposure: S.exposure, beaconPeriod: 2.0, ghost: true, plume: true, debug: false,
+      diskTime: dt, flags: [1, 0, 1, 1], exposure: S.exposure, beaconPeriod: 2.0, ghost: true, plume: true, debug: false, minBodies: Renderer.MAX_BODIES,
       bodies: app.bodies.uniforms(world.t, cf.nearHorizon || cf.ratio < 3)
     });
     if (now - this.planT > 500 && pl.alive) { this.planT = now; this.plan = G.predict(holes, pl.s, 150, world.wall, 1.5); }
@@ -482,7 +569,7 @@
   // 雷達：沿用俯視圖。白虛線 ＝ 你不推的話會走的路；綠虛線 ＝ 選定的武器照射擊解射出去會走的路（看得到它彎）
   GameUI.prototype.drawMap = function () {
     var world = this.world, pl = world.player, r = G.radius(this.holes, pl.s), fc = pl.fc, sol = fc && this.weapon !== 'missile' ? fc[this.weapon] : null, map = this.app.map;
-    map.range = clamp(1.35 * r, 16, 120);
+    map.range = clamp(1.35 * r, 16, world.wall ? 1.5 * world.wall.R : 120);
     map.draw({
       holes: this.holes, tCam: world.t, disk: { on: true, rin: 3, rout: DISK_OUT }, game: true, wallR: world.wall ? world.wall.R : 0,
       cam: { pos: [pl.s[0], pl.s[1], pl.s[2]], fwd: pl.fwd, mode: 'fall', plan: this.plan, trail: [], fov: FOV },

@@ -14,13 +14,14 @@
   var BH = root.BH = root.BH || {};
 
   var TRAJ_N = 1024;      // 每條軌跡取樣幾點
-  var MAX_ROWS = 32;      // 最多幾條軌跡（戰鬥模式：幾艘船＋一堆光彈）
+  var MAX_ROWS = 48;      // 最多幾條軌跡（戰鬥模式：幾艘船＋光束、彈丸、飛彈、破片）
   var ROW_SPAN = 4;       // 每條軌跡在貼圖裡佔幾列
-  var BODY_VARIANTS = [0, 4, 16, 32];
+  var BODY_VARIANTS = [0, 4, 16, 32, 48];
   /* 飛船的格子貼圖切成幾份「船位」：第 0 份是原本的模型（模擬模式的船都用它），
    * 其餘給戰鬥模式 —— 每艘船自己一份，被打掉的格子只改它自己那一份。沿 z 疊 SLOT_Z 份、沿 y 疊 SLOT_Y 份
-   * （3D 貼圖每一邊最少保證 256，39 × 6 = 234、118 × 2 = 236）。著色器裡的 SLOT_Z 要跟這裡一樣。 */
-  var SLOT_Z = 6, SLOT_Y = 2;
+   * （3D 貼圖每一邊最少保證 256，39 × 6 = 234、118 × 2 = 236）。著色器裡的 SLOT_Z 要跟這裡一樣。
+   * 顯示卡的 3D 貼圖夠大的話 y 方向疊到 SLOT_Y_MAX 份（破片也各佔一個船位）；實際有幾個看 renderer.shipSlots。 */
+  var SLOT_Z = 6, SLOT_Y = 2, SLOT_Y_MAX = 4;
   var DISK_T = 80;
 
   function Renderer(canvas) {
@@ -43,6 +44,8 @@
     this.shipEmit = new Uint32Array(8);
     this.shipEng = new Float32Array(8 * 4); this.shipEngN = 0;
     this.shipPlume = [9.5, 2.4, 0.2]; this.shipBound = 1.2;
+    this.slotY = SLOT_Y;
+    this.max3D = gl.getParameter(gl.MAX_3D_TEXTURE_SIZE) || 256;
     this.uploadShip([1, 1, 1], new Uint8Array(1));
     // 星表（js/stars.js 分好格的資料）。還沒給的時候放一格空的，著色器只畫亂數補的那一層暗星
     this.starTex = gl.createTexture();
@@ -114,10 +117,11 @@
     gl.bindTexture(gl.TEXTURE_3D, this.shipTex);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     var one = dims[0] * dims[1] * dims[2] <= 1;               // 還沒有模型時的那一格空貼圖
-    this.shipSlots = one ? 1 : SLOT_Z * SLOT_Y;
+    this.slotY = one ? 1 : Math.max(SLOT_Y, Math.min(SLOT_Y_MAX, Math.floor(this.max3D / dims[1])));
+    this.shipSlots = one ? 1 : SLOT_Z * this.slotY;
     if (one) gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8UI, 1, 1, 1, 0, gl.RED_INTEGER, gl.UNSIGNED_BYTE, grid);
     else {
-      gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8UI, dims[0], dims[1] * SLOT_Y, dims[2] * SLOT_Z, 0, gl.RED_INTEGER, gl.UNSIGNED_BYTE, null);
+      gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8UI, dims[0], dims[1] * this.slotY, dims[2] * SLOT_Z, 0, gl.RED_INTEGER, gl.UNSIGNED_BYTE, null);
       gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, dims[0], dims[1], dims[2], gl.RED_INTEGER, gl.UNSIGNED_BYTE, grid);
     }
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
@@ -155,9 +159,19 @@
     this.uploadShip(m.dims, m.grid); this.shipEmit = m.emit;
     this.shipEng = new Float32Array(8 * 4); this.shipEngN = Math.min(8, m.engines.length);
     for (var i = 0; i < this.shipEngN; i++) this.shipEng.set([m.engines[i].x, m.engines[i].y, m.engines[i].z, m.engines[i].r], i * 4);
+    this.shipEngOwn = this.shipEngN;      // 前面這幾具是船自己的；後面可以再接別的模型的（見 addEngine）
     this.shipPlume = [m.plume.len, m.plume.rad, m.plume.gain];
     this.shipBound = m.bound * 1.02;
   };
+
+  /* 再接一具引擎（放在同一張格子貼圖裡的別的模型，例如飛彈）：x 噴嘴口、y z 中心、r 半徑，單位是格、座標是它在船位裡的位置。
+   * 回傳它是第幾具（物體的引擎遮罩用 1 << 這個數）；放不下 ⇒ −1。 */
+  Renderer.prototype.addEngine = function (e) {
+    if (this.shipEngN >= 8) return -1;
+    this.shipEng.set([e.x, e.y, e.z, e.r], this.shipEngN * 4);
+    return this.shipEngN++;
+  };
+  Renderer.prototype.resetEngines = function () { this.shipEngN = this.shipEngOwn || 0; };
 
   Renderer.prototype.resize = function (w, h) {
     if (this.canvas.width !== w || this.canvas.height !== h) { this.canvas.width = w; this.canvas.height = h; }
@@ -167,7 +181,7 @@
     var gl = this.gl, i;
     var nb = f.bodies ? Math.min(f.bodies.length, Renderer.MAX_BODIES) : 0;
     var variant = BODY_VARIANTS[BODY_VARIANTS.length - 1];
-    for (i = 0; i < BODY_VARIANTS.length; i++) if (BODY_VARIANTS[i] >= nb) { variant = BODY_VARIANTS[i]; break; }
+    for (i = 0; i < BODY_VARIANTS.length; i++) if (BODY_VARIANTS[i] >= Math.max(nb, f.minBodies || 0)) { variant = BODY_VARIANTS[i]; break; }      // minBodies：戰鬥模式一開始就用最大的那一支，打到一半才現編會卡一下
     var maxHoles = Math.max(1, f.holes.length);
     var pg = this.program(maxHoles, variant), L = pg.loc;
     gl.viewport(0, 0, f.width, f.height);
@@ -207,13 +221,14 @@
     if (L.uStarGrid) gl.uniform3f(L.uStarGrid, this.starGrid[0], this.starGrid[1], f.noCatalog ? 0 : this.starGrid[2]);
     gl.activeTexture(gl.TEXTURE0);
     if (variant > 0) {
-      var A = new Float32Array(variant * 4), B = new Float32Array(variant * 4), C = new Float32Array(variant * 4), D = new Float32Array(variant * 4);
-      for (i = 0; i < nb; i++) { A.set(f.bodies[i].A, i * 4); B.set(f.bodies[i].B, i * 4); C.set(f.bodies[i].C, i * 4); D.set(f.bodies[i].D, i * 4); }
+      var A = new Float32Array(variant * 4), B = new Float32Array(variant * 4), C = new Float32Array(variant * 4), D = new Float32Array(variant * 4), E = new Float32Array(variant * 4);
+      for (i = 0; i < nb; i++) { A.set(f.bodies[i].A, i * 4); B.set(f.bodies[i].B, i * 4); C.set(f.bodies[i].C, i * 4); D.set(f.bodies[i].D, i * 4); E.set(f.bodies[i].E || [0, 0, 0, 1], i * 4); }
       ui('uBodyCount', nb);
       if (L.uBodyA) gl.uniform4fv(L.uBodyA, A);
       if (L.uBodyB) gl.uniform4fv(L.uBodyB, B);
       if (L.uBodyC) gl.uniform4fv(L.uBodyC, C);
       if (L.uBodyD) gl.uniform4fv(L.uBodyD, D);
+      if (L.uBodyE) gl.uniform4fv(L.uBodyE, E);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.tex);
       ui('uTraj', 0);
