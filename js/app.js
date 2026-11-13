@@ -1,6 +1,6 @@
 /* 黑洞模擬 —— 介面主程式：主選單、場景、控制面板、讀數、畫面迴圈
  * 物理在 physics.js，畫面在 shader.js／renderer.js；這裡只把它們接起來。
- * 三個狀態（S.mode）：'menu' 主選單（後面照樣跑模擬當背景）、'sim' 黑洞模擬、'game' 太空戰鬥（js/game.js、js/gameui.js）。
+ * 三個狀態（S.mode）：'menu' 主選單（後面照樣跑模擬當背景）、'sim' 黑洞模擬、'game' 太空戰鬥（js/game.js、js/world.js、js/gameui.js）。
  */
 (function () {
   'use strict';
@@ -46,11 +46,17 @@
   catch (e) { shipModel = null; console.error('飛船模型載入失敗：', e); }
   function shipMeters() { return shipModel ? shipModel.dims[0] * shipModel.data.metersPerVoxel : 0; }
 
+  // 背景的星空：真的星表（js/stars_data.js）。壞了就只剩著色器用亂數補的那一層暗星，其他照常
+  var starCat = null, starGrid = null;
+  try { if (BH.Stars && BH.StarData) { starCat = BH.Stars.decode(BH.StarData); starGrid = BH.Stars.buildGrid(starCat, 28, 28, 0.0052); renderer.setStars(starGrid); } }
+  catch (e) { starCat = null; console.error('星表載入失敗：', e); }
+
   var rs0 = function () { return S.holes[0].rs; };
 
   // 太空戰鬥模式（要有飛船模型才開得了）
   var game = null;
-  if (BH.GameUI && BH.Game && shipModel) {
+  if (BH.GameUI && BH.Game && BH.World && shipModel) {
+    BH.World.setModel(shipModel);            // 劃出部位（反應爐、引擎、武器…），之後每艘船各拿一份格子
     game = new BH.GameUI({ canvas: canvas, renderer: renderer, bodies: bodies, map: map, S: S, toast: function (m) { toast(m); },
       exit: function () { setMode('menu'); }, frameMs: function () { return fpsAvg; } });
   }
@@ -709,6 +715,7 @@
     rows.push(T.row('顯示卡・反向對照：把黑洞拿掉之後的黑色像素數', a.black, 0, 0, 'abs', '同一個鏡頭有黑洞時是 ' + shot(staticCam(30), 20, H).black + ' 個'));
     if (shipModel) shipTests(rows, size, T);
     if (shipModel) gameTests(rows, size, T);
+    starTests(rows, size, T);
     return rows;
   }
 
@@ -784,15 +791,17 @@
     bodies.clear();
   }
 
-  /* 戰鬥模式用到的兩樣畫面上的東西（平直空間裡驗，有解析答案可以比）：
+  /* 戰鬥模式用到的三樣畫面上的東西（平直空間裡驗，有答案可以比）：
    *   1. 「有人開的船」的朝向是另外給的，不是照飛行方向 —— 顯示卡的剪影 ＝ JS 用同一個朝向逐像素走格子算的剪影
-   *   2. 敵機標記畫的位置（js/game.js 的 project，有算光行差）＝ 顯示卡真的把東西畫出來的位置 */
+   *   2. 敵機標記畫的位置（js/game.js 的 project，有算光行差）＝ 顯示卡真的把東西畫出來的位置
+   *   3. 被打過的船：顯示卡畫的是它自己那一份（挖過洞的）格子，不是原本的模型 */
   function gameTests(rows, size, T) {
-    var G = BH.Game;
-    if (!G || !shipModel) return;
+    var G = BH.Game, W = BH.World;
+    if (!G || !W || !shipModel) return;
     var H0 = [P.makeHole({ rs: 0 })], c = new BH.Camera(); c.r = 20; c.theta = 1.05; c.phi = 0.5;
     var cf = c.frame(H0), fov = 30, tanF = Math.tan(fov * DEG / 2), i;
     var pos = [0.4, 0.2, -0.3], fwd = G.norm([0.35, 0.5, 0.79]), up = G.norm(G.cross(G.cross(fwd, [0, 1, 0]), fwd)), R = 3;
+    var mine = { fwd: fwd, side: G.cross(up, fwd), up: up };
     function still(p, f, u) {      // 一直停在 p 的東西（歷史兩格就夠）
       var h = G.histNew(), v = { T: [-300, 0], X: [p[0], p[0]], Y: [p[1], p[1]], Z: [p[2], p[2]], UX: [0, 0], UY: [0, 0], UZ: [0, 0], UT: [1, 1], PX: [0, 0], PY: [0, 0], PZ: [0, 0], PT: [-1, -1], TAU: [-300, 0],
         FX: [f[0], f[0]], FY: [f[1], f[1]], FZ: [f[2], f[2]], TH: [0, 0], GX: [u[0], u[0]], GY: [u[1], u[1]], GZ: [u[2], u[2]], FL: [0, 0] };
@@ -808,8 +817,8 @@
         bodies: bodies.uniforms(0, false)
       }, size);
     }
-    function mask(F) {
-      var m = shipModel, kv = 2 * R / m.dims[0], out = new Uint8Array(size * size), ax = ['fwd', 'side', 'up'], o = [0, 0, 0], k, e;
+    function mask(F, grid) {
+      var m = { dims: shipModel.dims, grid: grid }, kv = 2 * R / m.dims[0], out = new Uint8Array(size * size), ax = ['fwd', 'side', 'up'], o = [0, 0, 0], k, e;
       var d0 = [cf.pos[0] - pos[0], cf.pos[1] - pos[1], cf.pos[2] - pos[2]];
       for (k = 0; k < 3; k++) { e = F[ax[k]]; o[k] = (d0[0] * e[0] + d0[1] * e[1] + d0[2] * e[2]) / kv + m.dims[k] / 2; }
       for (var y = 0; y < size; y++) for (var x = 0; x < size; x++) {
@@ -821,32 +830,34 @@
       }
       return out;
     }
+    function compare(px, a, b) {      // 顯示卡的剪影跟兩張 JS 算的各差幾個像素
+      var r = { gpu: 0, a: 0, da: 0, db: 0 };
+      for (var j = 0; j < size * size; j++) {
+        var g = px[j * 4] < 128 ? 1 : 0;
+        r.gpu += g; r.a += a[j];
+        if (g !== a[j]) r.da++;
+        if (g !== b[j]) r.db++;
+      }
+      return r;
+    }
     // 1. 朝向
     bodies.clear();
     bodies.addLive(still(pos, fwd, up), { radius: R, color: [1, 1, 1] });
     bodies.update(H0, 0, cf.pos, false);
-    var px = shot(cf.P, cf.pos), mine = mask({ fwd: fwd, side: G.cross(up, fwd), up: up }), byVel = mask(BH.Ship.frame(pos, [0, 0, 0], H0[0].pos));
-    var nGpu = 0, nCpu = 0, diff = 0, diffVel = 0;
-    for (i = 0; i < size * size; i++) {
-      var g = px[i * 4] < 128 ? 1 : 0;
-      nGpu += g; nCpu += mine[i];
-      if (g !== mine[i]) diff++;
-      if (g !== byVel[i]) diffVel++;
-    }
-    rows.push(T.row('顯示卡・戰鬥：有人開的船（朝向另外給）的剪影跟 JS 算的不一樣的像素數 ÷ 剪影像素數', diff / Math.max(nCpu, 1), 0, 4e-3, 'abs',
-      '剪影：顯示卡 ' + nGpu + '、JS ' + nCpu + ' 像素，不同 ' + diff + ' 個。反向對照：JS 改用「照飛行方向」的朝向算，不同 ' + diffVel + ' 個'));
-    rows.push(T.row('顯示卡・戰鬥・反向對照：照飛行方向的朝向算出來的剪影要差很多（比值 > 10 記 1）', diffVel > 10 * Math.max(diff, 1) ? 1 : 0, 1, 0, 'abs'));
+    var r1 = compare(shot(cf.P, cf.pos), mask(mine, shipModel.grid), mask(BH.Ship.frame(pos, [0, 0, 0], H0[0].pos), shipModel.grid));
+    rows.push(T.row('顯示卡・戰鬥：有人開的船（朝向另外給）的剪影跟 JS 算的不一樣的像素數 ÷ 剪影像素數', r1.da / Math.max(r1.a, 1), 0, 4e-3, 'abs',
+      '剪影：顯示卡 ' + r1.gpu + '、JS ' + r1.a + ' 像素，不同 ' + r1.da + ' 個。反向對照：JS 改用「照飛行方向」的朝向算，不同 ' + r1.db + ' 個'));
+    rows.push(T.row('顯示卡・戰鬥・反向對照：照飛行方向的朝向算出來的剪影要差很多（比值 > 10 記 1）', r1.db > 10 * Math.max(r1.da, 1) ? 1 : 0, 1, 0, 'abs'));
 
     // 2. 標記：攝影機以 0.12 c 橫著飛，看一顆停著的小球
     bodies.clear();
-    var ball = [0.5, -0.4, 0.3], tr = still(ball, [1, 0, 0], [0, 1, 0]);
-    bodies.addTraced(tr, { kind: 'ball', color: [1, 1, 1], radius: 0.3, linger: 1e9 });
+    var ball = [0.5, -0.4, 0.3];
+    bodies.addTraced(still(ball, [1, 0, 0], [0, 1, 0]), { kind: 'ball', color: [1, 1, 1], radius: 0.3, linger: 1e9 });
     bodies.update(H0, 0, cf.pos, false);
     var look = G.norm([ball[0] - cf.pos[0], ball[1] - cf.pos[1], ball[2] - cf.pos[2]]), upC = [0, 1, 0];
     var side = G.norm(G.cross(look, upC)), pm = P.launch(H0, cf.pos, side, 0.12, 'ball');
     var mv = G.cameraFrame(H0, cf.pos, [pm[4], pm[5], pm[6]], look, upC), st0 = G.cameraFrame(H0, cf.pos, [0, 0, 0], look, upC);
-    px = shot(mv.P, mv.pos);
-    var n = 0, sx = 0, sy = 0;
+    var px = shot(mv.P, mv.pos), n = 0, sx = 0, sy = 0;
     for (i = 0; i < size * size; i++) if (px[i * 4] < 128) { n++; sx += i % size; sy += Math.floor(i / size); }
     function toPx(pj) { return [(pj[0] / pj[2] / tanF * size + size) / 2 - 0.5, (pj[1] / pj[2] / tanF * size + size) / 2 - 0.5]; }
     var want = toPx(G.project(H0, mv, ball)), noAb = toPx(G.project(H0, st0, ball)), got = n ? [sx / n, sy / n] : [NaN, NaN];
@@ -854,7 +865,68 @@
       '小球 ' + n + ' 像素，中心 (' + got[0].toFixed(1) + ', ' + got[1].toFixed(1) + ')；標記 (' + want[0].toFixed(1) + ', ' + want[1].toFixed(1) + ')'));
     rows.push(T.row('顯示卡・戰鬥・反向對照：不算光行差的標記要差超過 20 個像素（1 = 是）', Math.hypot(got[0] - noAb[0], got[1] - noAb[1]) > 20 ? 1 : 0, 1, 0, 'abs',
       '不算光行差的標記在 (' + noAb[0].toFixed(1) + ', ' + noAb[1].toFixed(1) + ')，差 ' + Math.hypot(got[0] - noAb[0], got[1] - noAb[1]).toFixed(1) + ' 像素'));
+
+    // 3. 被打過的船：在第 1 個船位放一份挖過的格子（機翼上一個坑、從背上鑽進去一條洞、機頭削掉一截），再改成只重傳被挖掉的那一塊
+    var M = W.model() || W.setModel(shipModel), vox = new W.Vox(M), gone = [];
+    W.carveSphere(vox, [100, 34, 8], 15, gone);
+    W.carveTunnel(vox, [150, 59, 30], [0, 0, -1], 5, 40, gone);
+    W.carveSphere(vox, [197, 59, 10], 26, gone);              // 機頭削掉一截：輪廓一定看得出來
+    renderer.setShipSlot(1, M.grid);                         // 先放完整的
+    var x0 = 1e9, x1 = -1, y0 = 1e9, y1 = -1, z0 = 1e9, z1 = -1, nx = M.dims[0], ny = M.dims[1];
+    for (i = 0; i < gone.length; i++) {
+      var gx = gone[i] % nx, gy = Math.floor(gone[i] / nx) % ny, gz = Math.floor(gone[i] / (nx * ny));
+      x0 = Math.min(x0, gx); x1 = Math.max(x1, gx); y0 = Math.min(y0, gy); y1 = Math.max(y1, gy); z0 = Math.min(z0, gz); z1 = Math.max(z1, gz);
+    }
+    var bw = x1 - x0 + 1, bh = y1 - y0 + 1, bd = z1 - z0 + 1, buf = new Uint8Array(bw * bh * bd), kk = 0;
+    for (var zz = z0; zz <= z1; zz++) for (var yy = y0; yy <= y1; yy++) { var o2 = x0 + nx * (yy + ny * zz); buf.set(vox.grid.subarray(o2, o2 + bw), kk); kk += bw; }
+    renderer.patchShipSlot(1, x0, y0, z0, bw, bh, bd, buf);  // 再只重傳被挖掉的那一塊（戰鬥中就是這樣更新的）
     bodies.clear();
+    bodies.addLive(still(pos, fwd, up), { radius: R, color: [1, 1, 1], slot: 1 });
+    bodies.update(H0, 0, cf.pos, false);
+    var r3 = compare(shot(cf.P, cf.pos), mask(mine, vox.grid), mask(mine, M.grid));
+    rows.push(T.row('顯示卡・戰鬥：被打過的船（少了 ' + gone.length + ' 格）的剪影跟 JS 用同一份格子算的不一樣的像素數 ÷ 剪影像素數', r3.da / Math.max(r3.a, 1), 0, 4e-3, 'abs',
+      '剪影：顯示卡 ' + r3.gpu + '、JS ' + r3.a + ' 像素，不同 ' + r3.da + ' 個；只重傳了 ' + bw + '×' + bh + '×' + bd + ' 格的一小塊'));
+    rows.push(T.row('顯示卡・戰鬥・反向對照：跟「沒被打過」的剪影不一樣的像素數（> 100 記 1）', r3.db > 100 ? 1 : 0, 1, 0, 'abs', '不同 ' + r3.db + ' 個像素 —— 那就是洞'));
+    // 同一個畫面裡用原本模型（第 0 個船位）的船不受影響
+    bodies.clear();
+    bodies.addLive(still(pos, fwd, up), { radius: R, color: [1, 1, 1], slot: 0 });
+    bodies.update(H0, 0, cf.pos, false);
+    var r4 = compare(shot(cf.P, cf.pos), mask(mine, shipModel.grid), mask(mine, vox.grid));
+    rows.push(T.row('顯示卡・戰鬥：別的船位被挖了洞，用原本模型的船剪影不變（不同的像素數）', r4.da, 0, Math.max(4, 4e-3 * r4.a), 'abs', '反向對照：跟挖過的那一份比，不同 ' + r4.db + ' 個'));
+    bodies.clear();
+  }
+
+  /* 星空：著色器畫出來的最亮那一點，就在天狼星該在的地方（把黑洞拿掉、光走直線）。
+   * 正對著看 ⇒ 在畫面正中間；把鏡頭往旁邊轉 4° ⇒ 往反方向移 tan 4° ÷ tan(視角 ÷ 2) × 半個畫面寬。
+   * 反向對照：把星表拿掉（只剩亂數補的那一層暗星）⇒ 那個位置不亮了。 */
+  function starTests(rows, size, T) {
+    var G = BH.Game;
+    if (!G || !starCat) return;
+    var H0 = [P.makeHole({ rs: 0 })], fov = 20, tanF = Math.tan(fov * DEG / 2);
+    var sir = [starCat.dir[0], starCat.dir[1], starCat.dir[2]], up0 = Math.abs(sir[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+    var right = G.norm(G.cross(sir, up0)), up = G.cross(right, sir);
+    function shot(fwd, noCatalog) {
+      var cf = G.cameraFrame(H0, [3, 2, 1], [0, 0, 0], fwd, up);
+      var px = renderer.renderToPixels({
+        tanFov: tanF, camPos: cf.pos, P: cf.P, camInside: false, energyTest: false, holes: H0, far: 60, maxSteps: 300, stepScale: 1,
+        disk: { on: false, rin: 3, rout: 12, brightness: 1 }, diskTime: 0, flags: [0, 0, 1, 0], exposure: 1, beaconPeriod: 2, debug: false, noCatalog: !!noCatalog, bodies: []
+      }, size);
+      // 最亮那顆星的重心：先找最亮的值，再把亮度到九成以上的像素全部算進去（中心是一片飽和的平台，只看一個像素不準；
+      // 門檻取九成是為了不把同一個畫面裡其他比較暗的星也算進來）
+      var best = -1, sx = 0, sy = 0, sw = 0, i, v;
+      for (i = 0; i < size * size; i++) { v = px[i * 4] + px[i * 4 + 1] + px[i * 4 + 2]; if (v > best) best = v; }
+      for (i = 0; i < size * size; i++) { v = px[i * 4] + px[i * 4 + 1] + px[i * 4 + 2]; if (v >= 0.9 * best) { sx += v * (i % size); sy += v * Math.floor(i / size); sw += v; } }
+      return { x: sx / sw, y: sy / sw, peak: best, at: function (qx, qy) { var o = (Math.round(qy) * size + Math.round(qx)) * 4; return px[o] + px[o + 1] + px[o + 2]; } };
+    }
+    var c0 = (size - 1) / 2, a = shot(sir, false);
+    rows.push(T.row('顯示卡・星空：正對天狼星，畫面上最亮的那一點離正中間幾個像素', Math.hypot(a.x - c0, a.y - c0), 0, 0.3, 'abs',
+      '在 (' + a.x.toFixed(2) + ', ' + a.y.toFixed(2) + ')，正中間是 (' + c0 + ', ' + c0 + ')；512 見方、視角 ' + fov + '°'));
+    var turn = 4 * DEG, fwd2 = [sir[0] * Math.cos(turn) + right[0] * Math.sin(turn), sir[1] * Math.cos(turn) + right[1] * Math.sin(turn), sir[2] * Math.cos(turn) + right[2] * Math.sin(turn)];
+    var b = shot(fwd2, false), wantX = c0 - Math.tan(turn) / tanF * size / 2;
+    rows.push(T.row('顯示卡・星空：鏡頭往右轉 4°，天狼星在畫面上的橫向位置（像素）', b.x, wantX, 0.3, 'abs', '照投影算應該在 ' + wantX.toFixed(2) + '（往左移 ' + (c0 - wantX).toFixed(1) + ' 個像素），縱向 ' + b.y.toFixed(2)));
+    var n = shot(sir, true);
+    rows.push(T.row('顯示卡・星空・反向對照：把星表拿掉之後，正中間那個像素剩多亮（÷ 原本）< 0.3 記 1', n.at(c0, c0) / Math.max(a.at(c0, c0), 1) < 0.3 ? 1 : 0, 1, 0, 'abs',
+      '原本 ' + a.at(c0, c0) + '、拿掉之後 ' + n.at(c0, c0) + '（三個色頻相加，滿的是 765）'));
   }
 
   function runSelfTest() {

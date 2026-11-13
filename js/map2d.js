@@ -149,6 +149,14 @@
       }
     }
 
+    // 戰鬥模式：外圍那一圈空間扭曲從哪裡開始
+    if (st.wallR) {
+      ctx.setLineDash([2 * dpr, 6 * dpr]);
+      ctx.strokeStyle = 'rgba(140,190,255,0.45)';
+      circle(hx, hz, st.wallR); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
     // 特徵半徑
     if (rs > 0) {
       ctx.setLineDash([4 * dpr, 4 * dpr]);

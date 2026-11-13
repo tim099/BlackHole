@@ -18,8 +18,9 @@
  * 質量大到跟黑洞可以比的時候，測試粒子近似本身就不成立，這裡沒有處理。
  *
  * 戰鬥模式（js/game.js）另外用到兩種：
- *   addLive   有人開的船（shape = 'pilot'）：不是測地線，軌跡是「到現在為止實際走過的路」，每一格由外面接長；
- *             另外帶機頭、上方、引擎出力、被打中的閃光四個欄位，一樣照座標時間存、照光經過的那一刻查。
+ *   addLive   自己會動的東西：不是測地線，軌跡是「到現在為止實際走過的路」，每一格由外面接長。
+ *             有人開的船（shape = 'pilot'）另外帶機頭、上方、引擎出力、被打中的閃光四個欄位，一樣照座標時間存、
+ *             照光經過的那一刻查；飛彈（shape = 'ball'）只有位置與速度。
  *   addTraced 已經算好的一條軌跡（光彈、爆炸的火球）：不會自動接長，走完就收。
  */
 (function (root) {
@@ -138,8 +139,9 @@
   Bodies.prototype.addLive = function (tr, o) {
     this.makeRoom();
     var b = {
-      group: this.nextGroup++, pulse: 0, kind: 'ball', shape: 'pilot', color: o.color || [1, 1, 1], radius: o.radius,
-      mass: 0, e: 0, absorbed: true, live: true, tr: tr, row: this.freeRows.shift(), spec: null, seen: null, now: null, tag: o.tag || null
+      group: this.nextGroup++, pulse: 0, kind: 'ball', shape: o.shape || 'pilot', color: o.color || [1, 1, 1], radius: o.radius,
+      mass: 0, e: 0, absorbed: true, live: true, tr: tr, row: this.freeRows.shift(), spec: null, seen: null, now: null, tag: o.tag || null,
+      slot: o.slot || 0, engMask: 255      // 飛船：用格子貼圖的第幾個船位、哪幾具引擎還在
     };
     this.upload(b);
     this.list.push(b);
@@ -298,6 +300,7 @@
     var out = [];
     for (var i = 0; i < this.list.length; i++) {
       var b = this.list[i], tr = b.tr;
+      if (b.hidden) continue;                      // 外面說這一格不用畫（例如確定在鏡頭外的小東西）
       var mid = (b.seenT == null) ? b.t0 : b.seenT;
       var lo = Math.max(b.t0, tCam - LOOKBACK, mid - (wide ? 45 : 22)), hi = Math.min(b.t1, tCam, mid + (wide ? 18 : 10));
       if (hi < lo) continue;
@@ -316,7 +319,7 @@
       var rad = 0.5 * Math.hypot(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]) + b.radius * (b.shape === 'cube' ? 1.75 : (isShip ? this.shipBound : 1)) + (stride > 1 ? 0.8 : 0.3);
       out.push({
         A: [b.t0 - tCam, (this.trajN - 1) / (b.t1 - b.t0), b.row, b.radius],
-        D: [lo - tCam, hi - tCam, 0, 0],
+        D: [lo - tCam, hi - tCam, b.slot || 0, b.engMask == null ? 255 : b.engMask],
         B: [b.color[0], b.color[1], b.color[2], b.kind === 'light' ? 1 : (b.shape === 'cube' ? 2 : (b.shape === 'ship' ? 3 : (b.shape === 'pilot' ? 4 : 0)))],
         C: [0.5 * (mn[0] + mx[0]), 0.5 * (mn[1] + mx[1]), 0.5 * (mn[2] + mx[2]), rad]
       });

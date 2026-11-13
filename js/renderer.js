@@ -17,6 +17,10 @@
   var MAX_ROWS = 32;      // 最多幾條軌跡（戰鬥模式：幾艘船＋一堆光彈）
   var ROW_SPAN = 4;       // 每條軌跡在貼圖裡佔幾列
   var BODY_VARIANTS = [0, 4, 16, 32];
+  /* 飛船的格子貼圖切成幾份「船位」：第 0 份是原本的模型（模擬模式的船都用它），
+   * 其餘給戰鬥模式 —— 每艘船自己一份，被打掉的格子只改它自己那一份。沿 z 疊 SLOT_Z 份、沿 y 疊 SLOT_Y 份
+   * （3D 貼圖每一邊最少保證 256，39 × 6 = 234、118 × 2 = 236）。著色器裡的 SLOT_Z 要跟這裡一樣。 */
+  var SLOT_Z = 6, SLOT_Y = 2;
   var DISK_T = 80;
 
   function Renderer(canvas) {
@@ -40,12 +44,23 @@
     this.shipEng = new Float32Array(8 * 4); this.shipEngN = 0;
     this.shipPlume = [9.5, 2.4, 0.2]; this.shipBound = 1.2;
     this.uploadShip([1, 1, 1], new Uint8Array(1));
+    // 星表（js/stars.js 分好格的資料）。還沒給的時候放一格空的，著色器只畫亂數補的那一層暗星
+    this.starTex = gl.createTexture();
+    this.starGrid = [1, 1, 0];
+    gl.bindTexture(gl.TEXTURE_2D, this.starTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 1, 1, 0, gl.RGBA, gl.FLOAT, new Float32Array(4));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindTexture(gl.TEXTURE_2D, this.tex);
     this.lastCompileMs = 0;
   }
   Renderer.TRAJ_N = TRAJ_N;
   Renderer.MAX_ROWS = MAX_ROWS;
   Renderer.MAX_BODIES = BODY_VARIANTS[BODY_VARIANTS.length - 1];
   Renderer.DISK_T = DISK_T;
+  Renderer.SHIP_SLOTS = SLOT_Z * SLOT_Y;
 
   Renderer.prototype.compile = function (type, src) {
     var gl = this.gl, sh = gl.createShader(type);
@@ -98,7 +113,13 @@
     var gl = this.gl;
     gl.bindTexture(gl.TEXTURE_3D, this.shipTex);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8UI, dims[0], dims[1], dims[2], 0, gl.RED_INTEGER, gl.UNSIGNED_BYTE, grid);
+    var one = dims[0] * dims[1] * dims[2] <= 1;               // 還沒有模型時的那一格空貼圖
+    this.shipSlots = one ? 1 : SLOT_Z * SLOT_Y;
+    if (one) gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8UI, 1, 1, 1, 0, gl.RED_INTEGER, gl.UNSIGNED_BYTE, grid);
+    else {
+      gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8UI, dims[0], dims[1] * SLOT_Y, dims[2] * SLOT_Z, 0, gl.RED_INTEGER, gl.UNSIGNED_BYTE, null);
+      gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, dims[0], dims[1], dims[2], gl.RED_INTEGER, gl.UNSIGNED_BYTE, grid);
+    }
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
@@ -106,6 +127,28 @@
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
     this.shipDim = dims.slice();
+  };
+  // grid ＝ BH.Stars.buildGrid(...) 的結果；null ⇒ 拿掉星表
+  Renderer.prototype.setStars = function (grid) {
+    var gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.starTex);
+    if (grid) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, grid.width, grid.height, 0, gl.RGBA, gl.FLOAT, grid.data);
+    this.starGrid = grid ? [grid.G, grid.K, 1] : [1, 1, 0];
+    gl.bindTexture(gl.TEXTURE_2D, this.tex);
+  };
+  // 把一整份格子放進第 slot 個船位（戰鬥模式：一艘船出場、或修回原樣的時候）
+  Renderer.prototype.setShipSlot = function (slot, grid) {
+    var d = this.shipDim;
+    this.patchShipSlot(slot, 0, 0, 0, d[0], d[1], d[2], grid);
+  };
+  // 只重傳第 slot 個船位裡的一小塊（被打掉的那一塊）：起點 (x0, y0, z0)、大小 w × h × dz，data 照 x → y → z 排
+  Renderer.prototype.patchShipSlot = function (slot, x0, y0, z0, w, h, dz, data) {
+    var gl = this.gl, d = this.shipDim;
+    if (!(slot >= 0 && slot < this.shipSlots)) return;
+    gl.bindTexture(gl.TEXTURE_3D, this.shipTex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texSubImage3D(gl.TEXTURE_3D, 0, x0, Math.floor(slot / SLOT_Z) * d[1] + y0, (slot % SLOT_Z) * d[2] + z0, w, h, dz, gl.RED_INTEGER, gl.UNSIGNED_BYTE, data);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
   };
   // m ＝ BH.Ship.decode(...) 的結果
   Renderer.prototype.setShip = function (m) {
@@ -158,6 +201,11 @@
     u1('uBeaconPeriod', f.beaconPeriod);
     u1('uGhost', f.ghost === false ? 0 : 1);
     ui('uDebug', f.debug ? 1 : 0);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.starTex);
+    ui('uStars', 2);
+    if (L.uStarGrid) gl.uniform3f(L.uStarGrid, this.starGrid[0], this.starGrid[1], f.noCatalog ? 0 : this.starGrid[2]);
+    gl.activeTexture(gl.TEXTURE0);
     if (variant > 0) {
       var A = new Float32Array(variant * 4), B = new Float32Array(variant * 4), C = new Float32Array(variant * 4), D = new Float32Array(variant * 4);
       for (i = 0; i < nb; i++) { A.set(f.bodies[i].A, i * 4); B.set(f.bodies[i].B, i * 4); C.set(f.bodies[i].C, i * 4); D.set(f.bodies[i].D, i * 4); }

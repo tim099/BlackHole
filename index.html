@@ -80,9 +80,11 @@
   #ghelp { bottom: 10px; color: var(--dim); font-size: 12px; line-height: 1.7; }
   #ghelp b { color: var(--txt); font-weight: 600; }
   body.mode-game #ghud, body.mode-game #gpanel, body.mode-game #ghelp { display: block; }
-  #gpanel .k { color: var(--dim); display: inline-block; width: 66px; }
+  #gpanel .k { color: var(--dim); display: inline-block; width: 72px; }
   #gpanel .small { color: var(--dim); font-size: 11px; margin-top: 4px; }
   #gpanel .warn, #gpanel .warn .k { color: #ff8a6a; }
+  #gpanel .wsel { background: rgba(255,180,84,.16); border-radius: 5px; margin: 0 -5px; padding: 0 5px; }
+  #gpanel .wsel .k { color: var(--acc); }
   .gbar { display: flex; align-items: center; gap: 6px; }
   .gbar .track { flex: 1; height: 9px; background: rgba(255,255,255,.10); border-radius: 5px; overflow: hidden; }
   .gbar .track i { display: block; height: 100%; }
@@ -126,14 +128,14 @@
 <div id="overlay"><div class="box"><h2 id="ovTitle"></h2><div id="ovText"></div><div class="btnrow" style="margin-top:12px"><button id="ovAgain">再掉一次</button><button id="ovBack">回到外面</button></div></div></div>
 <canvas id="ghud"></canvas>
 <div id="gpanel" class="box"></div>
-<div id="ghelp" class="box"><b>W S</b> 前進／倒退　<b>A D</b> 橫移　<b>R F</b> 升降　<b>Shift</b> 加力（吃能量）<br><b>方向鍵</b>或<b>拖曳滑鼠</b> 轉向　<b>Q E</b> 滾轉　<b>空白鍵</b> 開火<br><b>C</b> 軌道輔助　<b>V</b> 視角　<b>P</b> 暫停／回主選單<br>把準星移到<b style="color:#ffe178">黃色菱形</b>上再開火（變綠＝對準了）。菱形是算過「光會彎、它在動、你也在動」之後的瞄準點；紅框是你看到的敵機 —— 那是它幾秒前的位置。</div>
+<div id="ghelp" class="box"><b>W S</b> 往前／往後推　<b>Shift</b> 加力（吃能量）<br><b>A D</b> 機頭左右　<b>R F</b> 機頭上下　<b>Q E</b> 滾轉（方向鍵、拖曳滑鼠也可以轉）<br><b>1 2 3</b> 選武器：雷射／動能砲／飛彈　<b>空白鍵</b> 開火<br><b>T</b> 自動開火　<b>G</b> 自動飛行　<b>C</b> 軌道輔助　<b>V</b> 視角　<b>H</b> 收起這塊說明　<b>P</b> 暫停／回主選單<br>把準星移到<b style="color:#ffe178">菱形（雷射）</b>或<b style="color:#ffaa5a">方框（動能砲）</b>上再開火，變綠＝對準了。那是算過「路會彎、它在動、你也在動」之後的瞄準點；紅框是你看到的敵機 —— 它幾秒前的位置。<br>沒有血量：打到哪裡、哪裡的格子就沒了。反應爐或駕駛艙壞了才算毀。</div>
 <div id="gover"><div class="box"><h2 id="goTitle"></h2><div id="goText"></div><div class="btnrow" style="margin-top:12px"><button id="goResume">繼續</button><button id="goAgain">再來一場</button><button id="goMenu">回主選單</button></div></div></div>
 <div id="menu"><div class="box menubox">
   <h1>黑洞</h1>
   <div class="sub">每一個像素都是往回追一條光線算出來的。選一個模式：</div>
   <div class="modes">
     <button class="mode" data-mode="sim"><b>黑洞模擬</b><span>光線彎曲、把東西丟進去、自己掉進去、飛船。四個場景，速度、方向、質量、吸積盤都能自己調，每個讀數都對過解析值。</span><i>按 1</i></button>
-    <button class="mode" data-mode="game"><b>太空戰鬥</b><span>開著餘暉號在黑洞旁邊纏鬥。光彈會被黑洞彎、你看到的敵機是幾秒前的它、靠得越近外面的時間過得越快 —— 掉進視界就回不來了。</span><i>按 2</i></button>
+    <button class="mode" data-mode="game"><b>太空戰鬥</b><span>開著餘暉號在黑洞旁邊纏鬥。雷射、動能砲、飛彈都會被黑洞彎；你看到的敵機是幾秒前的它；船身是一格一格的，打到哪裡壞哪裡 —— 掉進視界就回不來了。</span><i>按 2</i></button>
   </div>
   <div class="note" style="margin-top:12px">滑鼠點選，或按鍵盤 1、2。進去之後隨時可以回到這裡（模擬按 M，戰鬥按 P）。</div>
 </div></div>
@@ -143,7 +145,10 @@
 <script src="js/physics.js"></script>
 <script src="js/ship_data.js"></script>
 <script src="js/ship.js"></script>
+<script src="js/stars_data.js"></script>
+<script src="js/stars.js"></script>
 <script src="js/game.js"></script>
+<script src="js/world.js"></script>
 <script src="js/selftest.js"></script>
 <script src="js/shader.js"></script>
 <script src="js/renderer.js"></script>

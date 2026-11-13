@@ -54,15 +54,21 @@ uniform float uExposure;
 uniform float uBeaconPeriod;
 uniform float uGhost;         // 1 ⇒ 物體繞過黑洞另一側才到的像（重影）也畫；0 ⇒ 只畫直接看到的那一個
 uniform int uDebug;          // 1 ⇒ 只輸出光線的結局（白：到天空，黑：被抓住，紅：步數用完）
+uniform sampler2D uStars;    // 星表：天球投到立方體六個面、每面 G × G 格、每格最多 K 顆（xyz 方向, w = 色溫 ÷ 250 ＋ (星等 + 2) ÷ 10）
+uniform vec3 uStarGrid;      // G, K, 有沒有星表（0／1）
+const vec3 GAL_N = vec3(0.250722, 0.902598, 0.351010);   // 北銀極在模擬座標裡的方向（js/stars.js 的 GAL_N）
+const vec3 GAL_C = vec3(0.963518, -0.267644, 0.);        // 銀河中心的方向（js/stars.js 的 GAL_C）
 #if MAX_BODIES > 0
 uniform int uBodyCount;
 uniform vec4 uBodyA[MAX_BODIES];   // 軌跡起點時間 − 攝影機時間, 每單位時間幾格, 第幾列, 半徑
 uniform vec4 uBodyB[MAX_BODIES];   // 顏色 rgb, 種類（0 球，1 光子標記，2 立方體，3 飛船，4 有人開的飛船）
 uniform vec4 uBodyC[MAX_BODIES];   // 包圍球：中心 xyz, 半徑
-uniform vec4 uBodyD[MAX_BODIES];   // 可能被看到的時段（相對攝影機時間）：最早, 最晚
+uniform vec4 uBodyD[MAX_BODIES];   // 可能被看到的時段（相對攝影機時間）：最早, 最晚；飛船另外用：第幾個船位, 哪幾具引擎還在（每具一個 bit）
 uniform sampler2D uTraj;           // 每個物體四列：(x, y, z, τ)、(dx/dλ, dt/dλ)，橫軸是座標時間；
                                    // 種類 4 多用兩列：(機頭 xyz, 引擎出力)、(上方 xyz, 被打中的閃光)
-uniform usampler3D uShip;          // 飛船的格子：每格一個 RGB332 色號（0 ＝ 空），x 機頭、y 左舷、z 上（js/ship.js）
+#define SLOT_Z 6
+uniform usampler3D uShip;          // 飛船的格子：每格一個 RGB332 色號（0 ＝ 空），x 機頭、y 左舷、z 上（js/ship.js）；
+                                   // 整張貼圖切成好幾個船位（沿 z 疊 SLOT_Z 份、再沿 y 疊），每艘戰鬥中的船自己一份（js/renderer.js）
 uniform vec3 uShipDim;             // 飛船外框幾格（nx, ny, nz）；半徑 R ＝ 半個船長
 uniform uvec4 uShipEmit0, uShipEmit1;  // 哪些色號會自己發光（256 個 bit）
 #define MAX_ENG 8
@@ -77,6 +83,7 @@ out vec4 outColor;
 float hash12(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * .1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
 vec3 hash32(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * vec3(.1031, .1030, .0973)); p3 += dot(p3, p3.yxz + 33.33); return fract((p3.xxy + p3.yzz) * p3.zyx); }
 float hash13(vec3 p3){ p3 = fract(p3 * .1031); p3 += dot(p3, p3.zyx + 31.32); return fract((p3.x + p3.y) * p3.z); }
+vec3 hash33(vec3 p3){ p3 = fract(p3 * vec3(.1031, .1030, .0973)); p3 += dot(p3, p3.yxz + 33.33); return fract((p3.xxy + p3.yxx) * p3.zyx); }
 float vnoise3(vec3 p){
   vec3 i = floor(p), f = fract(p); f = f * f * (3. - 2. * f);
   return mix(mix(mix(hash13(i), hash13(i + vec3(1,0,0)), f.x), mix(hash13(i + vec3(0,1,0)), hash13(i + vec3(1,1,0)), f.x), f.y),
@@ -158,22 +165,48 @@ vec3 skyColor(vec3 d, float g, float pix){
     if (a.x >= a.y && a.x >= a.z) { uv = d.yz / a.x; face = d.x > 0. ? 0. : 1.; }
     else if (a.y >= a.z) { uv = d.xz / a.y; face = d.y > 0. ? 2. : 3.; }
     else { uv = d.xy / a.z; face = d.z > 0. ? 4. : 5.; }
-    for (int L = 0; L < 3; L++) {
-      float G = L == 0 ? 20. : (L == 1 ? 46. : 104.);
-      float rad = max(L == 0 ? .0034 : (L == 1 ? .0026 : .0020), 1.25 * pix);
-      vec2 q = (uv * .5 + .5) * G; vec2 c = floor(q); vec2 f = fract(q);
-      vec3 h = hash32(c + vec2(face * 17.3 + float(L) * 71.7, face * 5.1 + float(L) * 13.9));
-      vec2 sp = .22 + .56 * h.xy;
-      float size = min(rad * G * .5, .2);
-      float dd = length(f - sp) / size;
-      float mag = L == 0 ? (.5 + 1.6 * h.z) : pow(h.z, 5.) * 1.4 + .05;
-      float core = exp(-dd * dd * 2.2);
-      vec3 sc = bbColor(mix(3300., 12000., fract(h.z * 7.31 + h.x)));
-      col += sc * mag * core;
+    // 星表上的星（真的位置、亮度、顏色；js/stars.js）：只讀這個方向所在的那一格
+    if (uStarGrid.z > .5) {
+      int G = int(uStarGrid.x + .5), K = int(uStarGrid.y + .5);
+      ivec2 cell = clamp(ivec2(floor((uv * .5 + .5) * uStarGrid.x)), ivec2(0), ivec2(G - 1));
+      int bx = int(face) * G + cell.x, by = cell.y * K;
+      float r0 = clamp(1.25 * pix, .0030, .0065);                       // 光暈至少一個多像素寬；上限跟分格時留的邊界一致
+      for (int k = 0; k < 32; k++) {
+        if (k >= K) break;
+        vec4 s = texelFetch(uStars, ivec2(bx, by + k), 0);
+        if (s.w <= 0.) break;
+        float mag = fract(s.w) * 10. - 2.;
+        float dd = length(d - s.xyz) / (r0 * (1. + .5 * max(0., 3. - mag)));   // 越亮光暈越大（js/stars.js 的 haloRadius 是同一個式子）
+        if (dd > 1.8) continue;                                              // 分格時也是照 1.8 倍半徑留邊界
+        // 亮度壓過：真的星等差 5 等是 100 倍，這裡只差 10 倍，不然螢幕上暗星全看不見
+        col += bbColor(floor(s.w) * 250.) * (1.5 * pow(10., -.2 * mag)) * exp(-dd * dd * 2.2);
+      }
     }
-    // 銀河：一條繞天球的亮帶
-    float b = dot(d, normalize(vec3(.25, .9, .35)));
-    float band = exp(-b * b * 20.);
+    // 比星表更暗的星：沒有資料，用亂數補一層很暗的。這一層不是真的星。
+    // 做法：把方向放大 N 倍、切成小方塊，每個方塊裡放一顆位置隨機的星，只留落在半徑 N 附近一層薄球殼裡的 ——
+    // 這樣在球面上是均勻的（不會看到格子），每個像素看到的也是同一批；再照銀緯篩掉一些，往銀河面集中。
+    {
+      const float N = 56.;
+      vec3 p = d * N, base = floor(p - .5);
+      float rad = clamp(1.1 * pix, .0019, .0026);
+      for (int i = 0; i < 8; i++) {
+        vec3 id = base + vec3(float(i & 1), float((i >> 1) & 1), float((i >> 2) & 1));
+        vec3 q = id + hash33(id);
+        float rq = length(q);
+        if (abs(rq - N) > .35) continue;
+        vec3 sd = q / rq;
+        float bg = dot(sd, GAL_N);
+        if (hash13(id + 7.7) > mix(.22, 1., exp(-bg * bg * 7.))) continue;
+        float dd = length(d - sd) / rad;
+        if (dd > 2.2) continue;
+        float h = hash13(id + 3.1);
+        col += bbColor(mix(3500., 11000., hash13(id + 9.4))) * (.03 + .15 * h * h) * exp(-dd * dd * 2.2);
+      }
+    }
+    // 銀河：沿著銀河面的一條亮帶，朝銀河中心那一側比較亮、比較寬
+    float b = dot(d, GAL_N);
+    float gc = smoothstep(.2, 1., dot(d, GAL_C));
+    float band = exp(-b * b * mix(20., 9., gc)) * (1. + 1.3 * gc);
     float cl = fbm3(d * 5. + 3.);
     float dust = smoothstep(.30, .62, fbm3(d * 9. + 11.));
     col += band * (.05 + .30 * cl * cl) * mix(.35, 1., dust) * vec3(.80, .86, 1.);
@@ -304,12 +337,13 @@ void shipFrame(vec3 pos, vec3 vel, out vec3 fwd, out vec3 side, out vec3 up){
  * 亮的芯 ＋ 外面一圈藍色的暈，越往後越淡、越粗；芯上有一節一節的亮紋。閃爍照船自己的固有時 tau 走，
  * 所以靠近視界時噴射也跟著慢下來。o、dv：這一小段光線在模型座標（格）裡的起點與位移，只算 s ∈ [s0, s1]。
  * 回傳加上去的顏色；sNear ＝ 這一小段最先碰到噴射外框的位置（沒碰到 ⇒ 2）。 */
-vec3 shipPlume(vec3 o, vec3 dv, float s0, float s1, float tau, float jit, out float sNear){
+vec3 shipPlume(vec3 o, vec3 dv, float s0, float s1, float tau, float jit, int mask, out float sNear){
   vec3 acc = vec3(0.); sNear = 2.;
   float vl = length(dv);
   vec3 dvs = vec3(abs(dv.x) < 1e-9 ? 1e-9 : dv.x, abs(dv.y) < 1e-9 ? 1e-9 : dv.y, abs(dv.z) < 1e-9 ? 1e-9 : dv.z);
   for (int e = 0; e < MAX_ENG; e++) {
     if (e >= uShipEngN) break;
+    if (((mask >> e) & 1) == 0) continue;               // 這一具引擎壞了：沒有噴射
     vec4 E = uShipEng[e];
     float Lp = uShipPlume.x * E.w, Rm = uShipPlume.y * E.w;
     vec3 tA = (vec3(E.x - Lp, E.y - Rm, E.z - Rm) - o) / dvs, tB = (vec3(E.x, E.y + Rm, E.z + Rm) - o) / dvs;
@@ -464,6 +498,9 @@ void main(){
           vec3 tmn = min(tA, tB), tmx = max(tA, tB);
           float sN = max(max(tmn.x, tmn.y), tmn.z), sF = min(min(min(tmx.x, tmx.y), tmx.z), 1.);
           int ax = 0; float sv = 2.;
+          int slot = int(D.z + .5);
+          ivec3 dim0 = ivec3(uShipDim + .5);
+          ivec3 slotOff = ivec3(0, (slot / SLOT_Z) * dim0.y, (slot - (slot / SLOT_Z) * SLOT_Z) * dim0.z);   // 這艘船的格子在貼圖裡從哪裡開始
           ivec3 stp = ivec3(dvs.x > 0. ? 1 : -1, dvs.y > 0. ? 1 : -1, dvs.z > 0. ? 1 : -1);
           if (!(sN > sF || sF < 0. || max(sN, 0.) >= sBody)) {
             ax = sN > 0. ? (tmn.x >= tmn.y && tmn.x >= tmn.z ? 0 : (tmn.y >= tmn.z ? 1 : 2)) : 0;
@@ -473,7 +510,7 @@ void main(){
             vec3 tMx = (vec3(cc) + vec3(greaterThan(dvs, vec3(0.))) - o) / dvs;
             vec3 tDl = abs(1. / dvs);
             for (int it = 0; it < 400; it++) {
-              shipIdx = texelFetch(uShip, cc, 0).r;
+              shipIdx = texelFetch(uShip, cc + slotOff, 0).r;
               if (shipIdx != 0u) break;
               if (tMx.x < tMx.y) { if (tMx.x < tMx.z) { sv = tMx.x; cc.x += stp.x; tMx.x += tDl.x; ax = 0; } else { sv = tMx.z; cc.z += stp.z; tMx.z += tDl.z; ax = 2; } }
               else { if (tMx.y < tMx.z) { sv = tMx.y; cc.y += stp.y; tMx.y += tDl.y; ax = 1; } else { sv = tMx.z; cc.z += stp.z; tMx.z += tDl.z; ax = 2; } }
@@ -484,7 +521,7 @@ void main(){
           if (uShipPlume.w > .5 && uShipEngN > 0 && shipThr > .02) {
             float sNear;
             vec3 gl = shipPlume(o, dv, 0., min(shipIdx != 0u ? sv : 1., min(sBody, 1.)), pb.w + (t - tq) * iut,
-                                hash12(gl_FragCoord.xy + vec2(float(i) * 3.7, float(b) * 11.3)), sNear);
+                                hash12(gl_FragCoord.xy + vec2(float(i) * 3.7, float(b) * 11.3)), int(D.w + .5), sNear);
             if (sNear < 1.5) {
               if (uFlags.x > .5) {
                 vec4 ps = mix(p, p1, sNear);
